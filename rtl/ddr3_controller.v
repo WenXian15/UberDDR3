@@ -111,7 +111,7 @@ module ddr3_controller #(
         input wire[wb_sel_bits - 1:0] i_wb_sel, //byte strobe for write (1 = write the byte)
         input wire[AUX_WIDTH - 1:0]  i_aux, //for AXI-interface compatibility (given upon strobe)
         // Wishbone outputs
-        output wire o_wb_stall, //1 = busy, cannot accept requests
+        output reg o_wb_stall, //1 = busy, cannot accept requests
         output wire o_wb_ack, //1 = read/write request has completed
         output wire o_wb_err, //1 = Error due to ECC double bit error (fixed to 0 if WB_ERROR = 0)
         output reg[wb_data_bits - 1:0] o_wb_data, //read data, for a 4:1 controller data width is 8 times the number of pins on the device
@@ -363,18 +363,19 @@ module ddr3_controller #(
                 ISSUE_READ = 11,
                 //ISSUE_READ_2 = 12,
                 READ_DATA = 12,
-                ANALYZE_DATA = 13, 
-                CHECK_STARTING_DATA = 14,
-                BITSLIP_DQS_TRAIN_3 = 15,
-                //WRITE_ZERO = 16,
-                BURST_WRITE = 17,
-                BURST_READ = 18,
-                RANDOM_WRITE = 19,
-                RANDOM_READ = 20,
-                ALTERNATE_WRITE_READ = 21,
-                FINISH_READ = 22,
-                DONE_CALIBRATE = 23,
-                ANALYZE_DATA_LOW_FREQ = 24;
+                ANALYZE_DATA_PREP = 13, 
+                ANALYZE_DATA = 14, 
+                CHECK_STARTING_DATA = 15,
+                BITSLIP_DQS_TRAIN_3 = 16,
+                //WRITE_ZERO = 17,
+                BURST_WRITE = 18,
+                BURST_READ = 19,
+                RANDOM_WRITE = 20,
+                RANDOM_READ = 21,
+                ALTERNATE_WRITE_READ = 22,
+                FINISH_READ = 23,
+                DONE_CALIBRATE = 24,
+                ANALYZE_DATA_LOW_FREQ = 25;
                 
      localparam STORED_DQS_SIZE = 5, //must be >= 2           
                 REPEAT_DQS_ANALYZE = 1,
@@ -580,7 +581,9 @@ module ddr3_controller #(
     reg write_calib_dq = 0;
     reg prev_write_level_feedback = 1;
     reg[wb_data_bits-1:0] read_data_store = 0;
+    reg[63:0] read_data_store_lane;
     reg[127:0] write_pattern = 0;
+    reg[63:0] write_pattern_lane = 0;
     reg[$clog2(64):0] data_start_index[LANES-1:0];   
     reg[LANES-1:0] lane_write_dq_late = 0;    
     reg[LANES-1:0] lane_read_dq_early = 0;    
@@ -1989,10 +1992,12 @@ module ddr3_controller #(
         end
     end //end of always block
     
-    assign force_o_wb_stall_high_d = !final_calibration_done || !instruction[REF_IDLE];
-    assign force_o_wb_stall_calib_high_d = !instruction[REF_IDLE];
-    assign o_wb_stall = o_wb_stall_int_q || force_o_wb_stall_high_q;
-    assign o_wb_stall_calib = o_wb_stall_int_q || force_o_wb_stall_calib_high_q;
+    always @* begin
+        force_o_wb_stall_high_d = !final_calibration_done || !instruction[REF_IDLE];
+        force_o_wb_stall_calib_high_d = !instruction[REF_IDLE];
+        o_wb_stall = o_wb_stall_int_q || force_o_wb_stall_high_q;
+        o_wb_stall_calib = o_wb_stall_int_q || force_o_wb_stall_calib_high_q;
+    end
 
     // register previous value of cmd_ck_en
     always @(posedge i_controller_clk) begin
@@ -2291,7 +2296,9 @@ module ddr3_controller #(
             calib_data <= 0;
             pause_counter <= 0;
             read_data_store <= 0;
+            read_data_store_lane <= 0;
             write_pattern <= 0;
+            write_pattern_lane <= 0;
             added_read_pipe_max <= 0;
             dqs_start_index_stored <= 0;
             dqs_start_index_repeat <= 0;        
@@ -2769,7 +2776,7 @@ module ddr3_controller #(
            READ_DATA: if({o_aux[AUX_WIDTH-((ECC_ENABLE == 3)? 6 : 1) : 0], o_wb_ack_uncalibrated}== {{(AUX_WIDTH-((ECC_ENABLE == 3)? 6 : 1)){1'b0}}, 1'b1, 1'b1}) begin //wait for the read ack (which has AUX ID of 1}
                          read_data_store <= o_wb_data_uncalibrated; // read data on address 0 
                          calib_stb <= 0;
-                         state_calibrate <= DLL_OFF? ANALYZE_DATA_LOW_FREQ : ANALYZE_DATA;
+                         state_calibrate <= DLL_OFF? ANALYZE_DATA_LOW_FREQ : ANALYZE_DATA_PREP;
                         //  data_start_index[lane] <= 0; // dont set to zero since this may have been already set by previous CHECK_STARTING_DATA
                          // Possible Patterns (strong autocorrel stat)
                          //0x80dbcfd275f12c3d   
@@ -2874,6 +2881,15 @@ module ddr3_controller #(
                 `endif
             end
         end
+
+        ANALYZE_DATA_PREP: begin
+            write_pattern_lane <= write_pattern[ (lane_write_dq_late[lane]? 0 : data_start_index[lane])  +: 64];
+            read_data_store_lane <= {read_data_store[((DQ_BITS*LANES)*7 + {29'd0, lane}<<3) +: 8], read_data_store[((DQ_BITS*LANES)*6 + {29'd0, lane}<<3) +: 8],
+                        read_data_store[((DQ_BITS*LANES)*5 + {29'd0, lane}<<3) +: 8], read_data_store[((DQ_BITS*LANES)*4 + {29'd0, lane}<<3) +: 8], read_data_store[((DQ_BITS*LANES)*3 + {29'd0, lane}<<3) +: 8],
+                        read_data_store[((DQ_BITS*LANES)*2 + {29'd0, lane}<<3) +: 8],read_data_store[((DQ_BITS*LANES)*1 + {29'd0, lane}<<3) +: 8],read_data_store[((DQ_BITS*LANES)*0 + {29'd0, lane}<<3) +: 8] };
+            state_calibrate <= ANALYZE_DATA;
+        end
+
                         // extract burst_0-to-burst_7 data for a specified lane then determine which byte in write_pattern does it starts (ASSUMPTION: the DQ is too early [3d_9177298cd0ad51]c1 is written)
                         // NOTE TO SELF: all "8" here assume DQ_BITS are 8? parameterize this properly
                         // data_start_index for a specified lane determine how many bits are off the data from the write command
@@ -2881,9 +2897,7 @@ module ddr3_controller #(
                         // e.g. LANE={burst7, burst6, burst5, burst4, burst3, burst2, burst1, burst0} then with 1 ddr3 cycle delay between DQ and command 
                         // burst0 will not be written but only starting on burst1
                         // if lane_write_dq_late is already set to 1 for this lane, then current lane should already be fixed without changing the data_start_index
-        ANALYZE_DATA: if(write_pattern[ (lane_write_dq_late[lane]? 0 : data_start_index[lane])  +: 64] == {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] }) begin   
+        ANALYZE_DATA: if(write_pattern_lane == read_data_store_lane) begin   
                             /* verilator lint_off WIDTH */
                             if(lane == LANES - 1) begin
                             /* verilator lint_on WIDTH */
@@ -2899,11 +2913,12 @@ module ddr3_controller #(
                             else begin
                                 lane <= lane + 1;
                                 data_start_index[lane+1] <= 0;
+                                state_calibrate <= ANALYZE_DATA_PREP;
                                 `ifdef UART_DEBUG_ALIGN
                                     uart_start_send <= 1'b1;
                                     uart_text <= {"state=ANALYZE_DATA, Done lane=",hex_to_ascii(lane),8'h0a,"-----------------",8'h0a};
                                     state_calibrate <= WAIT_UART;
-                                    state_calibrate_next <= ANALYZE_DATA;
+                                    state_calibrate_next <= ANALYZE_DATA_PREP;
                                 `endif
                             end
                       end 
@@ -2948,6 +2963,7 @@ module ddr3_controller #(
                         `ifdef UART_DEBUG_ALIGN
                             else begin
                                 uart_start_send <= 1'b1;
+                                state_calibrate <= ANALYZE_DATA_PREP;
                                 uart_text <= {"state=ANALYZE_DATA, lane=",hex_to_ascii(lane), ", data_start_index[lane]=0x",
                                     hex_to_ascii(data_start_index[lane][6:4]),hex_to_ascii(data_start_index[lane][3:0]),8'h0a,8'h0a,8'h0a,8'h0a,
                                     {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
@@ -2956,7 +2972,7 @@ module ddr3_controller #(
                                         8'h0a,8'h0a,8'h0a,8'h0a
                                     };
                                 state_calibrate <= WAIT_UART;
-                                state_calibrate_next <= ANALYZE_DATA;
+                                state_calibrate_next <= ANALYZE_DATA_PREP;
                             end
                         `endif
                       end     
