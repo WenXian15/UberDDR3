@@ -111,7 +111,7 @@ module ddr3_controller #(
         input wire[wb_sel_bits - 1:0] i_wb_sel, //byte strobe for write (1 = write the byte)
         input wire[AUX_WIDTH - 1:0]  i_aux, //for AXI-interface compatibility (given upon strobe)
         // Wishbone outputs
-        output reg o_wb_stall, //1 = busy, cannot accept requests
+        output wire o_wb_stall, //1 = busy, cannot accept requests
         output wire o_wb_ack, //1 = read/write request has completed
         output wire o_wb_err, //1 = Error due to ECC double bit error (fixed to 0 if WB_ERROR = 0)
         output reg[wb_data_bits - 1:0] o_wb_data, //read data, for a 4:1 controller data width is 8 times the number of pins on the device
@@ -517,7 +517,7 @@ module ddr3_controller #(
     end
     reg cmd_odt_q = 0, cmd_odt, cmd_reset_n;
     reg[DUAL_RANK_DIMM:0] cmd_ck_en, prev_cmd_ck_en;  
-    reg o_wb_stall_int_q = 1, o_wb_stall_int_d, o_wb_stall_calib_q = 1, o_wb_stall_calib_d, o_wb_stall_d;
+    reg o_wb_stall_int_q = 1, o_wb_stall_int_d, o_wb_stall_calib;
     reg precharge_slot_busy;
     reg activate_slot_busy;
     reg[1:0] write_dqs_q;
@@ -650,8 +650,6 @@ module ddr3_controller #(
     reg[wb_data_bits-1:0] wrong_data = 0, expected_data=0;
     wire[wb_data_bits-1:0] correct_data;
     reg[LANES-1:0] late_dq;
-    wire force_o_wb_stall_high;
-    wire force_o_wb_stall_calib_high;
     reg stage2_do_wr_or_rd;
     reg stage2_do_wr;
     reg stage2_do_update_delay_before_precharge_after_wr;
@@ -661,10 +659,11 @@ module ddr3_controller #(
     reg stage2_do_update_delay_before_read_after_act;
     reg stage2_do_update_delay_before_write_after_act;
     reg stage2_do_pre; 
+    reg force_o_wb_stall_high_q, force_o_wb_stall_high_d;
+    reg force_o_wb_stall_calib_high_q, force_o_wb_stall_calib_high_d;
 
     // initial block for all regs
     initial begin
-        o_wb_stall = 1;
         for(index = 0; index < MAX_ADDED_READ_ACK_DELAY; index = index + 1) begin
             o_wb_ack_read_q[index] = 0;
         end
@@ -921,9 +920,7 @@ module ddr3_controller #(
     //process request transaction 
     always @(posedge i_controller_clk) begin
         if(sync_rst_controller) begin
-            o_wb_stall <= 1'b1; 
             o_wb_stall_int_q <= 1'b1;
-            o_wb_stall_calib_q <= 1'b1;
             //set stage 1 to 0
             stage1_pending <= 0;
             stage1_aux <= 0;
@@ -981,9 +978,7 @@ module ddr3_controller #(
         
         // can only start accepting requests  when reset is done
         else if(reset_done) begin 
-            o_wb_stall <= o_wb_stall_d;
             o_wb_stall_int_q <= o_wb_stall_int_d; 
-            o_wb_stall_calib_q <= o_wb_stall_calib_d;
             cmd_odt_q <= cmd_odt;
 
             //update delay counter 
@@ -1386,9 +1381,9 @@ module ddr3_controller #(
             // when not in refresh, transaction can only be processed when i_wb_cyc is high and not stall 
             // OR stage0 is pending and stage2 is about to be empty
             // AND ecc_stage1_stall low (if high then stage2 will have ECC operation while stage1 remains)
-            assign stage0_update = ((i_wb_cyc && !o_wb_stall) || (!final_calibration_done && !o_wb_stall_calib_q)) && ecc_stage1_stall; // stage0 is only used when ECC will be inserted next cycle (stage1 must remain)
+            assign stage0_update = ((i_wb_cyc && !o_wb_stall) || (!final_calibration_done && !o_wb_stall_calib)) && ecc_stage1_stall; // stage0 is only used when ECC will be inserted next cycle (stage1 must remain)
             assign stage1_update = ( (i_wb_cyc && !o_wb_stall) || (stage0_pending && !ecc_stage2_stall) ) && !ecc_stage1_stall;
-            assign stage1_update_calib = ( ((!final_calibration_done) && !o_wb_stall_calib_q) || (stage0_pending && !ecc_stage2_stall) ) && !ecc_stage1_stall;
+            assign stage1_update_calib = ( ((!final_calibration_done) && !o_wb_stall_calib) || (stage0_pending && !ecc_stage2_stall) ) && !ecc_stage1_stall;
             /* verilator lint_off WIDTH */
             assign wb_addr_plus_anticipate = wb_addr_mux + MARGIN_BEFORE_ANTICIPATE; // wb_addr_plus_anticipate determines if it is near the end of column by checking if it jumps to next row
             assign calib_addr_plus_anticipate = calib_addr_mux + MARGIN_BEFORE_ANTICIPATE; // just same as wb_addr_plus_anticipate but while doing calibration
@@ -1501,7 +1496,7 @@ module ddr3_controller #(
             // logic when to update stage 1:
             // when not in refresh, transaction can only be processed when i_wb_cyc is high and not stall 
             assign stage1_update = i_wb_cyc && !o_wb_stall;
-            assign stage1_update_calib = !final_calibration_done && !o_wb_stall_calib_q;
+            assign stage1_update_calib = !final_calibration_done && !o_wb_stall_calib;
             /* verilator lint_off WIDTH */
             assign wb_addr_plus_anticipate = i_wb_addr + MARGIN_BEFORE_ANTICIPATE; // wb_addr_plus_anticipate determines if it is near the end of column by checking if it jumps to next row
             assign calib_addr_plus_anticipate = calib_addr + MARGIN_BEFORE_ANTICIPATE; // just same as wb_addr_plus_anticipate but while doing calibration
@@ -1958,23 +1953,15 @@ module ddr3_controller #(
         if(ECC_ENABLE != 3) begin
             if(!i_wb_cyc && final_calibration_done) begin
                 o_wb_stall_int_d = 0;
-                o_wb_stall_d = force_o_wb_stall_high;
-                o_wb_stall_calib_d = force_o_wb_stall_calib_high;
             end
             else if(!o_wb_stall_int_q && ( (!i_wb_stb && final_calibration_done) || (!calib_stb && !final_calibration_done) )) begin
                 o_wb_stall_int_d = 0;
-                o_wb_stall_d = force_o_wb_stall_high;
-                o_wb_stall_calib_d = force_o_wb_stall_calib_high;
             end
             else if(o_wb_stall_int_q || !stage1_pending)  begin
                 o_wb_stall_int_d = stage2_stall;
-                o_wb_stall_d = stage2_stall || force_o_wb_stall_high;
-                o_wb_stall_calib_d = stage2_stall || force_o_wb_stall_calib_high;
             end
             else begin
                 o_wb_stall_int_d = stage1_stall;
-                o_wb_stall_d = stage1_stall || force_o_wb_stall_high;
-                o_wb_stall_calib_d = stage1_stall || force_o_wb_stall_calib_high;
             end
         end
         // pipeline control for ECC_ENABLE = 3
@@ -2002,16 +1989,22 @@ module ddr3_controller #(
         end
     end //end of always block
     
-    assign force_o_wb_stall_high = !final_calibration_done || force_o_wb_stall_calib_high;
-    assign force_o_wb_stall_calib_high = !instruction[REF_IDLE];
+    assign force_o_wb_stall_high_d = !final_calibration_done || !instruction[REF_IDLE];
+    assign force_o_wb_stall_calib_high_d = !instruction[REF_IDLE];
+    assign o_wb_stall = o_wb_stall_int_q || force_o_wb_stall_high_q;
+    assign o_wb_stall_calib = o_wb_stall_int_q || force_o_wb_stall_calib_high_q;
 
     // register previous value of cmd_ck_en
     always @(posedge i_controller_clk) begin
         if(sync_rst_controller) begin
             prev_cmd_ck_en <= 0;
+            force_o_wb_stall_high_q <= 0;
+            force_o_wb_stall_calib_high_q <= 0;
         end
         else begin
             prev_cmd_ck_en <= cmd_ck_en;
+            force_o_wb_stall_high_q <= force_o_wb_stall_high_d;
+            force_o_wb_stall_calib_high_q <= force_o_wb_stall_calib_high_d;
         end
     end
     
@@ -2724,7 +2717,7 @@ module ddr3_controller #(
                         `endif
                          end
                             
-        ISSUE_WRITE_1: if(instruction_address == 22 && !o_wb_stall_calib_q) begin
+        ISSUE_WRITE_1: if(instruction_address == 22 && !o_wb_stall_calib) begin
                         calib_stb <= 1;//actual request flag
                         calib_aux <= 0; //AUX ID to determine later if ACK is for read or write
                         calib_sel <= {wb_sel_bits{1'b1}};
@@ -2801,7 +2794,7 @@ module ddr3_controller #(
                         //     state_calibrate_next <= ANALYZE_DATA_LOW_FREQ;
                         // `endif
                       end   
-                      else if(!o_wb_stall_calib_q) begin
+                      else if(!o_wb_stall_calib) begin
                             calib_stb <= 0;
                             // if(i_phy_iserdes_data != 0) begin
                             //     `ifdef UART_DEBUG_ALIGN // check if i_phy_iserdes_data ever receives a non-zero data
@@ -3043,7 +3036,7 @@ BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to cap
                         end
                      end
                                    
-       BURST_WRITE: if(!o_wb_stall_calib_q) begin // Test 1: Burst write (per byte write to test datamask feature), then burst read
+       BURST_WRITE: if(!o_wb_stall_calib) begin // Test 1: Burst write (per byte write to test datamask feature), then burst read
                             calib_stb <= 1'b1; 
                             calib_aux <= 2; // write
                             if(TDQS == 0 && ECC_ENABLE == 0) begin //Test datamask by writing 1 byte at a time
@@ -3094,7 +3087,7 @@ BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to cap
                            end
                      end
                    
-         BURST_READ: if(!o_wb_stall_calib_q) begin
+         BURST_READ: if(!o_wb_stall_calib) begin
                             calib_stb <= 1'b1;
                             calib_aux <= 3; // read
                             calib_we <= 0; 
@@ -3116,7 +3109,7 @@ BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to cap
                             end  
                        end
                        
-        RANDOM_WRITE: if(!o_wb_stall_calib_q) begin // Test 2: Random write (increments row address to force precharge-act-r/w) then random read
+        RANDOM_WRITE: if(!o_wb_stall_calib) begin // Test 2: Random write (increments row address to force precharge-act-r/w) then random read
                             calib_stb <= 1'b1; 
                             calib_aux <= 2; // write
                             calib_sel <= {wb_sel_bits{1'b1}};
@@ -3144,7 +3137,7 @@ BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to cap
                             end
                       end
                     
-        RANDOM_READ: if(!o_wb_stall_calib_q) begin
+        RANDOM_READ: if(!o_wb_stall_calib) begin
                         calib_stb <= 1'b1;
                         calib_aux <= 3; // read
                         calib_we <= 0;
@@ -3170,7 +3163,7 @@ BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to cap
                         end
                      end
                      
-ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
+ALTERNATE_WRITE_READ: if(!o_wb_stall_calib) begin
                         calib_stb <= 1'b1;
                         calib_aux <= 2 + (calib_we? 1:0); //2 (write), 3 (read)
                         calib_sel <= {wb_sel_bits{1'b1}};
@@ -3238,7 +3231,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                         else if(uart_send_busy) begin // if already busy then uart_start_send can be deasserted
                             uart_start_send <= 0;
                         end
-                        if(!o_wb_stall_calib_q) begin // lower calib_stb only when the current request is accepted (stall low)
+                        if(!o_wb_stall_calib) begin // lower calib_stb only when the current request is accepted (stall low)
                             calib_stb <= 0;
                         end
                     end
@@ -3259,7 +3252,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                 pause_counter <= 1; // pause instruction address until pre-stall delay before refresh sequence finishes
                 //skip to instruction address 20 (precharge all before refresh) when no pending requests anymore
                 //toggle it for 1 clk cycle only
-                if( !stage1_pending && !stage2_pending && ( (o_wb_stall && final_calibration_done) || (o_wb_stall_calib_q && !final_calibration_done) ) ) begin 
+                if( !stage1_pending && !stage2_pending && ( (o_wb_stall && final_calibration_done) || (o_wb_stall_calib && !final_calibration_done) ) ) begin 
                    pause_counter <= 0; // pre-stall delay done since all remaining requests are completed
                 end
             end
@@ -4957,7 +4950,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                 if(stage0_pending) begin
                     if(final_calibration_done) assert(f_full); // r/w calibration test does not come from fifo so wait until final calibration is done
                     if(final_calibration_done) assert(o_wb_stall);
-                    if(!final_calibration_done) assert(o_wb_stall_calib_q);
+                    if(!final_calibration_done) assert(o_wb_stall_calib);
                     assert(stage1_pending && stage2_pending);
                     assert(ecc_req_stage2);
                 end
@@ -4978,7 +4971,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                 if(ecc_req_stage2) begin
                     // if there is ECC request on stage2, then o_wb_stall must be high (except when ecc_stage2_stall is low which means stage2 is done this cycle)
                     if(final_calibration_done) assert(o_wb_stall || !ecc_stage2_stall);
-                    else assert(o_wb_stall_calib_q || !ecc_stage2_stall);
+                    else assert(o_wb_stall_calib || !ecc_stage2_stall);
                     assert(stage1_pending && stage2_pending);
                 end
 
@@ -5072,12 +5065,12 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                     end
                     if(instruction_address != 22 && $past(instruction_address) != 22) begin
                         assert(o_wb_stall);
-                        assert(o_wb_stall_calib_q);
+                        assert(o_wb_stall_calib);
                     end
                     //delay_counter is zero at first clock of new instruction address, the actual delay_clock wil start at next clock cycle 
                     if(instruction_address == 19 && delay_counter != 0) begin
                         assert(o_wb_stall);
-                        assert(o_wb_stall_calib_q);
+                        assert(o_wb_stall_calib);
                     end
                     if(instruction_address == 20 || instruction_address == 21) begin //no pending request at precharge all and refresh command
                         assert(!stage1_pending);
@@ -5532,7 +5525,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                 if(!reset_done) begin
                     assert(!stage1_pending && !stage2_pending);
                     assert(o_wb_stall);
-                    assert(o_wb_stall_calib_q);
+                    assert(o_wb_stall_calib);
                 end
                 if(reset_done) begin
                     assert(instruction_address >= 19 && instruction_address <= 26);
@@ -5540,7 +5533,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib_q) begin
                 //delay_counter is zero at first clock of new instruction address, the actual delay_clock wil start at next clock cycle 
                 if(instruction_address == 19 && delay_counter != 0) begin
                     assert(o_wb_stall);
-                    assert(o_wb_stall_calib_q);
+                    assert(o_wb_stall_calib);
                 end
 
                 if(instruction_address == 19 && pause_counter) begin //pre-stall delay to finish all remaining requests
