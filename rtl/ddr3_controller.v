@@ -489,8 +489,8 @@ module ddr3_controller #(
     reg[COL_BITS-1:0] stage1_col = 0;
     reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_bank = 0;
     reg[ROW_BITS-1:0] stage1_row = 0;
-    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_next_bank = 0;
-    reg[ROW_BITS-1:0] stage1_next_row = 0;
+    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_next_bank = 0,stage1_next_bank_d;
+    reg[ROW_BITS-1:0] stage1_next_row = 0, stage1_next_row_d;
     wire[wb_addr_bits-1:0] wb_addr_plus_anticipate, calib_addr_plus_anticipate;
 
     //pipeline stage 2 regs
@@ -664,6 +664,8 @@ module ddr3_controller #(
     reg stage2_do_update_delay_before_read_after_act;
     reg stage2_do_update_delay_before_write_after_act;
     reg stage2_do_pre; 
+    reg stage1_do_pre;
+    reg stage1_do_act;
     reg force_o_wb_stall_high_q, force_o_wb_stall_high_d;
     reg force_o_wb_stall_calib_high_q, force_o_wb_stall_calib_high_d;
     reg prep_done;
@@ -986,6 +988,8 @@ module ddr3_controller #(
         else if(reset_done) begin 
             o_wb_stall_int_q <= o_wb_stall_int_d; 
             cmd_odt_q <= cmd_odt;
+            stage1_next_bank <= stage1_next_bank_d;
+            stage1_next_row <= stage1_next_row_d;
 
             //update delay counter 
             for(index=0; index< (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
@@ -1106,7 +1110,7 @@ module ddr3_controller #(
                 if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
                     if(DUAL_RANK_DIMM[0]) begin
                         stage1_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= i_wb_addr[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
-                        stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= wb_addr_plus_anticipate[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
+                        // stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= wb_addr_plus_anticipate[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
                     end
                     stage1_row <= i_wb_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
                     stage1_bank[BA_BITS-1:0] <=  i_wb_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
@@ -1117,7 +1121,7 @@ module ddr3_controller #(
                     //current column with a margin dictated by
                     //MARGIN_BEFORE_ANTICIPATE  
                     /* verilator lint_off WIDTH */
-                    {stage1_next_row , stage1_next_bank[BA_BITS-1:0]} <= wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    // {stage1_next_row , stage1_next_bank[BA_BITS-1:0]} <= wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
                     //anticipated next row and bank to be accessed 
                     /* verilator lint_on WIDTH */
                     stage1_data <= i_wb_data;
@@ -1181,7 +1185,7 @@ module ddr3_controller #(
                 if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
                     if(DUAL_RANK_DIMM[0]) begin
                         stage1_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= current_rank; // rank depends on current_rank
-                        stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= current_rank; // rank depends on current_rank
+                        // stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= current_rank; // rank depends on current_rank
                     end
                     stage1_row <= calib_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
                     stage1_bank[BA_BITS-1:0] <=  calib_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
@@ -1192,7 +1196,7 @@ module ddr3_controller #(
                     //current column with a margin dictated by
                     //MARGIN_BEFORE_ANTICIPATE  
                     /* verilator lint_off WIDTH */
-                    {stage1_next_row , stage1_next_bank[BA_BITS-1:0] } <= calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    // {stage1_next_row , stage1_next_bank[BA_BITS-1:0] } <= calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
                     //anticipated next row and bank to be accessed 
                     /* verilator lint_on WIDTH */
                     stage1_data <= calib_data;
@@ -1352,6 +1356,35 @@ module ddr3_controller #(
         stage2_bank_d = stage2_update? stage1_bank : stage2_bank;
         stage2_row_d = stage2_update? stage1_row : stage2_row;
         stage2_we_d = stage2_update? stage1_we : stage2_we;
+
+        if(stage1_update) begin
+            if(DUAL_RANK_DIMM[0]) begin
+                stage1_next_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = wb_addr_plus_anticipate[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
+            end
+            //stage1_next_bank will not increment unless stage1_next_col
+            //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+            //precharge and activate will happen only at the end of the
+            //current column with a margin dictated by
+            //MARGIN_BEFORE_ANTICIPATE  
+            /* verilator lint_off WIDTH */
+            {stage1_next_row_d , stage1_next_bank_d[BA_BITS-1:0]} = wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                 
+        end
+        else if(stage1_update_calib) begin
+            if(DUAL_RANK_DIMM[0]) begin
+                stage1_next_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = current_rank; // rank depends on current_rank
+            end
+            //stage1_next_bank will not increment unless stage1_next_col
+            //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+            //precharge and activate will happen only at the end of the
+            //current column with a margin dictated by
+            //MARGIN_BEFORE_ANTICIPATE  
+            {stage1_next_row_d , stage1_next_bank_d[BA_BITS-1:0] } = calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+        end 
+        else begin
+            stage1_next_bank_d = stage1_next_bank;
+            stage1_next_row_d = stage1_next_row;
+        end
     end
     
     always @(posedge i_controller_clk) begin
@@ -1365,6 +1398,9 @@ module ddr3_controller #(
             stage2_do_update_delay_before_read_after_act <= 0;
             stage2_do_update_delay_before_write_after_act <= 0;
             stage2_do_pre <= 0;
+
+            stage1_do_pre <= 0;
+            stage1_do_act <= 0;
         end
         else begin
             stage2_do_wr_or_rd <= bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] == stage2_row_d;
@@ -1377,6 +1413,8 @@ module ddr3_controller #(
             stage2_do_update_delay_before_write_after_act <= delay_before_write_counter_d[stage2_bank_d] <= ACTIVATE_TO_WRITE_DELAY;
             stage2_do_pre <= bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] != stage2_row_d &&  delay_before_precharge_counter_d[stage2_bank_d] == 0 ;
             
+            stage1_do_pre <= bank_status_d[stage1_next_bank_d] &&  bank_active_row_d[stage1_next_bank_d] != stage1_next_row_d && delay_before_precharge_counter_d[stage1_next_bank_d] == 0;
+            stage1_do_act <= !bank_status_d[stage1_next_bank_d] && delay_before_activate_counter_d[stage1_next_bank_d] == 0;
         end
     end
 
@@ -1655,8 +1693,55 @@ module ddr3_controller #(
             ecc_stage2_stall = 1;
             stage2_update = 0;
 
+            //bank is not idle but wrong row is activated so do precharge
+            if(stage2_do_pre) begin       
+                precharge_slot_busy = 1'b1;
+                //set-up delay before activate
+                delay_before_activate_counter_d[stage2_bank] = PRECHARGE_TO_ACTIVATE_DELAY;
+                //issue precharge command
+                if(DUAL_RANK_DIMM[0]) begin
+                    cmd_d[PRECHARGE_SLOT] = {!stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank[BA_BITS-1:0], { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage2_row[DUAL_RANK_DIMM[0]? 9 : 8:0] } };
+                end
+                else begin
+                    cmd_d[PRECHARGE_SLOT] = {1'b0, CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank, { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage2_row[9:0] } };
+                end
+                //update bank status and active row
+                bank_status_d[stage2_bank] = 1'b0; 
+            end
+
+            //bank is idle so activate it
+            else if(stage2_do_act) begin 
+                activate_slot_busy = 1'b1;
+                // must meet TRRD (activate to activate delay)
+                for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the activate to activate delay applies to all banks
+                    if(delay_before_activate_counter_q[index] <= ACTIVATE_TO_ACTIVATE_DELAY) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                        delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY;
+                    end
+                end
+
+                delay_before_precharge_counter_d[stage2_bank] = ACTIVATE_TO_PRECHARGE_DELAY;
+
+                //set-up delay before read and write
+                if(stage2_do_update_delay_before_read_after_act) begin // if current delay is > ACTIVATE_TO_READ_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                    delay_before_read_counter_d[stage2_bank] = ACTIVATE_TO_READ_DELAY;
+                end
+                if(stage2_do_update_delay_before_write_after_act) begin // if current delay is > ACTIVATE_TO_WRITE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                    delay_before_write_counter_d[stage2_bank] = ACTIVATE_TO_WRITE_DELAY;
+                end
+                //issue activate command
+                if(DUAL_RANK_DIMM[0]) begin
+                    cmd_d[ACTIVATE_SLOT] = {!stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_ACT[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank[BA_BITS-1:0], stage2_row[(DUAL_RANK_DIMM[0]? ROW_BITS-1 : ROW_BITS-2):0]};
+                end
+                else begin
+                    cmd_d[ACTIVATE_SLOT] = {1'b0, CMD_ACT[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank , stage2_row};
+                end
+                //update bank status and active row
+                bank_status_d[stage2_bank] = 1'b1;
+                bank_active_row_d[stage2_bank] = stage2_row;
+            end
+
             //right row is already active so go straight to read/write
-            if(stage2_do_wr_or_rd) begin //read/write operation
+            else if(stage2_do_wr_or_rd) begin //read/write operation
                 //write request
                 if(stage2_do_wr) begin       
                     stage2_stall = 0;
@@ -1792,53 +1877,6 @@ module ddr3_controller #(
                     cmd_d[3][CMD_ODT] = cmd_odt;
                 end
             end
-            
-            //bank is idle so activate it
-            else if(stage2_do_act) begin 
-                activate_slot_busy = 1'b1;
-                // must meet TRRD (activate to activate delay)
-                for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the activate to activate delay applies to all banks
-                    if(delay_before_activate_counter_q[index] <= ACTIVATE_TO_ACTIVATE_DELAY) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                        delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY;
-                    end
-                end
-
-                delay_before_precharge_counter_d[stage2_bank] = ACTIVATE_TO_PRECHARGE_DELAY;
-
-                //set-up delay before read and write
-                if(stage2_do_update_delay_before_read_after_act) begin // if current delay is > ACTIVATE_TO_READ_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                    delay_before_read_counter_d[stage2_bank] = ACTIVATE_TO_READ_DELAY;
-                end
-                if(stage2_do_update_delay_before_write_after_act) begin // if current delay is > ACTIVATE_TO_WRITE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                    delay_before_write_counter_d[stage2_bank] = ACTIVATE_TO_WRITE_DELAY;
-                end
-                //issue activate command
-                if(DUAL_RANK_DIMM[0]) begin
-                    cmd_d[ACTIVATE_SLOT] = {!stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_ACT[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank[BA_BITS-1:0], stage2_row[(DUAL_RANK_DIMM[0]? ROW_BITS-1 : ROW_BITS-2):0]};
-                end
-                else begin
-                    cmd_d[ACTIVATE_SLOT] = {1'b0, CMD_ACT[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank , stage2_row};
-                end
-                //update bank status and active row
-                bank_status_d[stage2_bank] = 1'b1;
-                bank_active_row_d[stage2_bank] = stage2_row;
-            end
-
-            //bank is not idle but wrong row is activated so do precharge
-            else if(stage2_do_pre) begin       
-                precharge_slot_busy = 1'b1;
-                //set-up delay before activate
-                delay_before_activate_counter_d[stage2_bank] = PRECHARGE_TO_ACTIVATE_DELAY;
-                //issue precharge command
-                if(DUAL_RANK_DIMM[0]) begin
-                    cmd_d[PRECHARGE_SLOT] = {!stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank[BA_BITS-1:0], { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage2_row[DUAL_RANK_DIMM[0]? 9 : 8:0] } };
-                end
-                else begin
-                    cmd_d[PRECHARGE_SLOT] = {1'b0, CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank, { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage2_row[9:0] } };
-                end
-                //update bank status and active row
-                bank_status_d[stage2_bank] = 1'b0; 
-            end
         end //end of stage 2 pending
 
         // pending request on stage 1
@@ -1857,7 +1895,7 @@ module ddr3_controller #(
                 //issue Activate and Precharge on the CURRENT bank. Else, stage
                 //1 will issue Activate and Precharge for the NEXT bank
                 // Thus stage 1 anticipate makes sure smooth burst operation that jumps banks
-                if(bank_status_q[stage1_next_bank] &&  bank_active_row_q[stage1_next_bank] != stage1_next_row && delay_before_precharge_counter_q[stage1_next_bank] ==0 && !precharge_slot_busy) begin    
+                if(stage1_do_pre && !precharge_slot_busy) begin    
                     //set-up delay before read and write
                     delay_before_activate_counter_d[stage1_next_bank] = PRECHARGE_TO_ACTIVATE_DELAY;
                     if(DUAL_RANK_DIMM[0]) begin
@@ -1870,7 +1908,7 @@ module ddr3_controller #(
                 end //end of anticipate precharge
                 
                 //anticipated bank is idle so do activate
-                else if(!bank_status_q[stage1_next_bank] && delay_before_activate_counter_q[stage1_next_bank] == 0 && !activate_slot_busy) begin 
+                else if(stage1_do_act && !activate_slot_busy) begin 
                     // must meet TRRD (activate to activate delay)
                     for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the activate to activate delay applies to all banks
                         if(delay_before_activate_counter_d[index] <= ACTIVATE_TO_ACTIVATE_DELAY) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
