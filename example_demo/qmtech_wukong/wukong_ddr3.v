@@ -156,7 +156,9 @@
         .WB2_DATA_BITS(32), //width of 2nd wishbone data bus
         .MICRON_SIM(0), //enable faster simulation for micron ddr3 model (shorten POWER_ON_RESET_HIGH and INITIAL_CKE_LOW)
         .ODELAY_SUPPORTED(0), //set to 1 when ODELAYE2 is supported
-        .SECOND_WISHBONE(0) //set to 1 if 2nd wishbone is needed 
+        .SECOND_WISHBONE(0), //set to 1 if 2nd wishbone is needed 
+        .BIST_MODE(1), // 0 = No BIST, 1 = run through all address space ONCE , 2 = run through all address space for every test (burst w/r, random w/r, alternating r/w)
+        .SPEED_BIN(1) // 0 = Use top-level parameters , 1 = DDR3-1066 (7-7-7) , 2 = DR3-1333 (9-9-9) , 3 = DDR3-1600 (11-11-11)
         ) ddr3_top
         (
             //clock and reset
