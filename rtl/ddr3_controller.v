@@ -298,6 +298,12 @@ module ddr3_controller #(
     localparam[3:0] WRITE_TO_WRITE_DELAY = 0;
     localparam[3:0] WRITE_TO_READ_DELAY = find_delay((CWL_nCK + 4 + ps_to_nCK(tWTR)), WRITE_SLOT, READ_SLOT); //4
     localparam[3:0] WRITE_TO_PRECHARGE_DELAY = find_delay((CWL_nCK + 4 + ps_to_nCK(tWR)), WRITE_SLOT, PRECHARGE_SLOT); //5
+    // determines bitwidth of delay counters
+    localparam MAX_DELAY_BEFORE_PRECHARGE = max(ACTIVATE_TO_PRECHARGE_DELAY, max(WRITE_TO_PRECHARGE_DELAY, READ_TO_PRECHARGE_DELAY));
+    localparam MAX_DELAY_BEFORE_ACTIVATE = max(PRECHARGE_TO_ACTIVATE_DELAY, ACTIVATE_TO_ACTIVATE_DELAY);
+    localparam MAX_DELAY_BEFORE_WRITE = max(ACTIVATE_TO_WRITE_DELAY, max(READ_TO_WRITE_DELAY + 'd1, WRITE_TO_WRITE_DELAY));
+    localparam MAX_DELAY_BEFORE_READ = max(ACTIVATE_TO_READ_DELAY, max(WRITE_TO_READ_DELAY + 'd1, READ_TO_READ_DELAY));
+
     /* verilator lint_on WIDTHEXPAND */
     localparam PRE_REFRESH_DELAY = WRITE_TO_PRECHARGE_DELAY + 1; 
     `ifdef FORMAL 
@@ -341,7 +347,7 @@ module ddr3_controller #(
      //the delays included the ODELAY and OSERDES when issuing the read command
      //and the IDELAY and ISERDES when receiving the data  (NOTE TO SELF: ELABORATE ON WHY THOSE MAGIC NUMBERS)
     localparam READ_ACK_PIPE_WIDTH = READ_DELAY + 1 + 2 + 1 + 1 + (DLL_OFF? 2 : 0); // FOr DLL_OFF, phy has no delay thus add delay here       
-    localparam MAX_ADDED_READ_ACK_DELAY = 16;
+    localparam MAX_ADDED_READ_ACK_DELAY = 2;
     localparam DELAY_BEFORE_WRITE_LEVEL_FEEDBACK = STAGE2_DATA_DEPTH + ps_to_cycles(tWLO+tWLOE) + 10;  
     //plus 10 controller clocks for possible bus latency and the delay for receiving feedback DQ from IOBUF -> IDELAY -> ISERDES
     localparam ECC_INFORMATION_BITS = (ECC_ENABLE == 2)? max_information_bits(wb_data_bits) : max_information_bits(wb_data_bits/8);
@@ -507,12 +513,12 @@ module ddr3_controller #(
     reg[COL_BITS-1:0] stage2_col = 0, stage2_col_d;
     reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage2_bank = 0, stage2_bank_d;
     reg[ROW_BITS-1:0] stage2_row = 0, stage2_row_d;
-    
+
     //delay counter for every banks
-    reg[3:0] delay_before_precharge_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_precharge_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0]; //delay counters
-    reg[3:0] delay_before_activate_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_activate_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
-    reg[3:0] delay_before_write_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_write_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
-    reg[3:0] delay_before_read_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] , delay_before_read_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
+    reg[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0] delay_before_precharge_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_precharge_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0]; //delay counters
+    reg[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0] delay_before_activate_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_activate_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
+    reg[$clog2(MAX_DELAY_BEFORE_WRITE):0] delay_before_write_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_write_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
+    reg[$clog2(MAX_DELAY_BEFORE_READ):0] delay_before_read_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] , delay_before_read_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0] ;
     
     //commands to be sent to PHY (4 slots per controller clk cycle)
     reg[cmd_len-1:0] cmd_d[3:0];
@@ -551,8 +557,8 @@ module ddr3_controller #(
     /* verilator lint_off UNUSEDSIGNAL */
     reg[15:0] dqs_bitslip_arrangement = 0;
     /* verilator lint_off UNUSEDSIGNAL */
-    reg[3:0] added_read_pipe_max = 0;
-    reg[3:0] added_read_pipe[LANES - 1:0]; 
+    reg added_read_pipe_max = 0;
+    reg added_read_pipe[LANES - 1:0]; 
     //each lane will have added delay relative to when ISERDES should actually return the data
     //this make sure that we will wait until the lane with longest delay (added_read_pipe_max) is received before
     //all lanes are sent to wishbone data
@@ -563,7 +569,7 @@ module ddr3_controller #(
     reg[$clog2(READ_ACK_PIPE_WIDTH-1):0] write_ack_index_q = 1, write_ack_index_d = 1;
     reg index_read_pipe; //tells which delay_read_pipe will be updated (there are two delay_read_pipe)
     reg index_wb_data; //tells which o_wb_data_q will be sent to o_wb_data
-    reg[15:0] delay_read_pipe[1:0]; //delay when each lane will retrieve i_phy_iserdes_data (since different lanes might not be aligned with each other and needs to be retrieved at a different time)
+    reg[1:0] delay_read_pipe[1:0]; //delay when each lane will retrieve i_phy_iserdes_data (since different lanes might not be aligned with each other and needs to be retrieved at a different time)
     reg[wb_data_bits - 1:0] o_wb_data_q[1:0]; //store data retrieved from i_phy_iserdes_data to be sent to o_wb_data
     wire[wb_data_bits - 1:0] o_wb_data_q_current;
     reg[wb_data_bits - 1:0] o_wb_data_q_q;
@@ -656,20 +662,21 @@ module ddr3_controller #(
     reg[wb_data_bits-1:0] wrong_data = 0, expected_data=0;
     wire[wb_data_bits-1:0] correct_data;
     reg[LANES-1:0] late_dq;
-    reg stage2_do_wr_or_rd;
-    reg stage2_do_wr;
-    reg stage2_do_update_delay_before_precharge_after_wr;
-    reg stage2_do_rd;
-    reg stage2_do_update_delay_before_precharge_after_rd;
-    reg stage2_do_act;
-    reg stage2_do_update_delay_before_read_after_act;
-    reg stage2_do_update_delay_before_write_after_act;
-    reg stage2_do_pre; 
-    reg stage1_do_pre;
-    reg stage1_do_act;
+    reg stage2_do_wr_or_rd, stage2_do_wr_or_rd_d;
+    reg stage2_do_wr, stage2_do_wr_d;
+    reg stage2_do_update_delay_before_precharge_after_wr, stage2_do_update_delay_before_precharge_after_wr_d;
+    reg stage2_do_rd, stage2_do_rd_d;
+    reg stage2_do_update_delay_before_precharge_after_rd, stage2_do_update_delay_before_precharge_after_rd_d;
+    reg stage2_do_act, stage2_do_act_d;
+    reg stage2_do_update_delay_before_read_after_act, stage2_do_update_delay_before_read_after_act_d;
+    reg stage2_do_update_delay_before_write_after_act, stage2_do_update_delay_before_write_after_act_d;
+    reg stage2_do_pre, stage2_do_pre_d; 
+    reg stage1_do_pre, stage1_do_pre_d;
+    reg stage1_do_act, stage1_do_act_d;
     reg force_o_wb_stall_high_q, force_o_wb_stall_high_d;
     reg force_o_wb_stall_calib_high_q, force_o_wb_stall_calib_high_d;
-    reg prep_done;
+    reg[1:0] prep_done;
+    reg write_pattern_matches;
     
     // initial block for all regs
     initial begin
@@ -1036,7 +1043,7 @@ module ddr3_controller #(
             stage2_col <= stage2_col_d;
             stage2_bank <= stage2_bank_d;
             stage2_row <= stage2_row_d;
-            cmd_odt_q <= precharge_all_instruction? 0 : cmd_odt;
+            cmd_odt_q <= precharge_all_instruction || !reset_done? 0 : cmd_odt;
             stage2_data_unaligned <= stage2_data_unaligned_d;
             stage2_data_unaligned_temp <= stage2_data_unaligned_temp_d;
             stage2_dm_unaligned <= stage2_dm_unaligned_d;
@@ -1442,6 +1449,8 @@ module ddr3_controller #(
         end
     end
     
+    // Logic for registering the conditions used for the 2-stage pipeline logic
+    // to cut the timing path and achieve higher max frequnecy
     always @(posedge i_controller_clk) begin
         if(sync_rst_controller) begin
             stage2_do_wr_or_rd <= 0;
@@ -1458,20 +1467,38 @@ module ddr3_controller #(
             stage1_do_act <= 0;
         end
         else begin
-            stage2_do_wr_or_rd <= bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] == stage2_row_d;
-            stage2_do_wr <= stage2_we_d && delay_before_write_counter_d[stage2_bank_d] == 0;
-            stage2_do_update_delay_before_precharge_after_wr <= delay_before_precharge_counter_d[stage2_bank_d] <= WRITE_TO_PRECHARGE_DELAY;
-            stage2_do_rd <= !stage2_we_d && delay_before_read_counter_d[stage2_bank_d] == 0;
-            stage2_do_update_delay_before_precharge_after_rd <= delay_before_precharge_counter_d[stage2_bank_d] <= READ_TO_PRECHARGE_DELAY;
-            stage2_do_act <= !bank_status_d[stage2_bank_d] && delay_before_activate_counter_d[stage2_bank_d] == 0;
-            stage2_do_update_delay_before_read_after_act <= delay_before_read_counter_d[stage2_bank_d] <= ACTIVATE_TO_READ_DELAY;
-            stage2_do_update_delay_before_write_after_act <= delay_before_write_counter_d[stage2_bank_d] <= ACTIVATE_TO_WRITE_DELAY;
-            stage2_do_pre <= bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] != stage2_row_d &&  delay_before_precharge_counter_d[stage2_bank_d] == 0 ;
-            
-            stage1_do_pre <= bank_status_d[stage1_next_bank_d] &&  bank_active_row_d[stage1_next_bank_d] != stage1_next_row_d && delay_before_precharge_counter_d[stage1_next_bank_d] == 0;
-            stage1_do_act <= !bank_status_d[stage1_next_bank_d] && delay_before_activate_counter_d[stage1_next_bank_d] == 0;
+            // stage 2 conditions
+            stage2_do_wr_or_rd <= stage2_do_wr_or_rd_d;
+            stage2_do_wr <= stage2_do_wr_d;
+            stage2_do_update_delay_before_precharge_after_wr <= stage2_do_update_delay_before_precharge_after_wr_d;
+            stage2_do_rd <= stage2_do_rd_d;
+            stage2_do_update_delay_before_precharge_after_rd <= stage2_do_update_delay_before_precharge_after_rd_d;
+            stage2_do_act <= stage2_do_act_d;
+            stage2_do_update_delay_before_read_after_act <= stage2_do_update_delay_before_read_after_act_d;
+            stage2_do_update_delay_before_write_after_act <= stage2_do_update_delay_before_write_after_act_d;
+            stage2_do_pre <= stage2_do_pre_d;
+            // stage 1 conditions
+            stage1_do_pre <= stage1_do_pre_d;
+            stage1_do_act <= stage1_do_act_d;
         end
     end
+
+    always @* begin
+        // stage 2 conditions
+        stage2_do_wr_or_rd_d = bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] == stage2_row_d; 
+        stage2_do_wr_d = stage2_we_d && delay_before_write_counter_d[stage2_bank_d] == 0;
+        stage2_do_update_delay_before_precharge_after_wr_d = delay_before_precharge_counter_d[stage2_bank_d] <= WRITE_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
+        stage2_do_rd_d = !stage2_we_d && delay_before_read_counter_d[stage2_bank_d] == 0;
+        stage2_do_update_delay_before_precharge_after_rd_d = delay_before_precharge_counter_d[stage2_bank_d] <= READ_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
+        stage2_do_act_d = !bank_status_d[stage2_bank_d] && delay_before_activate_counter_d[stage2_bank_d] == 0;
+        stage2_do_update_delay_before_read_after_act_d = delay_before_read_counter_d[stage2_bank_d] <= ACTIVATE_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0];
+        stage2_do_update_delay_before_write_after_act_d = delay_before_write_counter_d[stage2_bank_d] <= ACTIVATE_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0];
+        stage2_do_pre_d = bank_status_d[stage2_bank_d] &&  bank_active_row_d[stage2_bank_d] != stage2_row_d &&  delay_before_precharge_counter_d[stage2_bank_d] == 0 ;
+        // stage 2 conditions
+        stage1_do_pre_d = bank_status_d[stage1_next_bank_d] &&  bank_active_row_d[stage1_next_bank_d] != stage1_next_row_d && delay_before_precharge_counter_d[stage1_next_bank_d] == 0;
+        stage1_do_act_d = !bank_status_d[stage1_next_bank_d] && delay_before_activate_counter_d[stage1_next_bank_d] == 0;
+    end
+
 
     // generate signals to be received by stage1
     generate
@@ -1744,7 +1771,6 @@ module ddr3_controller #(
         //USE _d in ALL
         //if there is a pending request, issue the appropriate commands
         if(stage2_pending) begin 
-            stage2_stall = 1; //initially high when stage 2 is pending 
             ecc_stage2_stall = 1;
             stage2_update = 0;
 
@@ -1752,7 +1778,7 @@ module ddr3_controller #(
             if(stage2_do_pre) begin       
                 precharge_slot_busy = 1'b1;
                 //set-up delay before activate
-                delay_before_activate_counter_d[stage2_bank] = PRECHARGE_TO_ACTIVATE_DELAY;
+                delay_before_activate_counter_d[stage2_bank] = PRECHARGE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0];
                 //issue precharge command
                 if(DUAL_RANK_DIMM[0]) begin
                     cmd_d[PRECHARGE_SLOT] = {!stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage2_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage2_bank[BA_BITS-1:0], { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage2_row[DUAL_RANK_DIMM[0]? 9 : 8:0] } };
@@ -1769,19 +1795,19 @@ module ddr3_controller #(
                 activate_slot_busy = 1'b1;
                 // must meet TRRD (activate to activate delay)
                 for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the activate to activate delay applies to all banks
-                    if(delay_before_activate_counter_q[index] <= ACTIVATE_TO_ACTIVATE_DELAY) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                        delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY;
+                    if(delay_before_activate_counter_q[index] <= ACTIVATE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0]) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                        delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0];
                     end
                 end
 
-                delay_before_precharge_counter_d[stage2_bank] = ACTIVATE_TO_PRECHARGE_DELAY;
+                delay_before_precharge_counter_d[stage2_bank] = ACTIVATE_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
 
                 //set-up delay before read and write
                 if(stage2_do_update_delay_before_read_after_act) begin // if current delay is > ACTIVATE_TO_READ_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                    delay_before_read_counter_d[stage2_bank] = ACTIVATE_TO_READ_DELAY;
+                    delay_before_read_counter_d[stage2_bank] = ACTIVATE_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0];
                 end
                 if(stage2_do_update_delay_before_write_after_act) begin // if current delay is > ACTIVATE_TO_WRITE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                    delay_before_write_counter_d[stage2_bank] = ACTIVATE_TO_WRITE_DELAY;
+                    delay_before_write_counter_d[stage2_bank] = ACTIVATE_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0];
                 end
                 //issue activate command
                 if(DUAL_RANK_DIMM[0]) begin
@@ -1799,7 +1825,6 @@ module ddr3_controller #(
             else if(stage2_do_wr_or_rd) begin //read/write operation
                 //write request
                 if(stage2_do_wr) begin       
-                    stage2_stall = 0;
                     ecc_stage2_stall = 0;
                     stage2_update = 1;
                     cmd_odt = 1'b1;
@@ -1830,12 +1855,12 @@ module ddr3_controller #(
                         //tRAS requirement. Thus, we must first check if the
                         //delay_before_precharge is set to a value not more
                         //than the WRITE_TO_PRECHARGE_DELAY
-                        delay_before_precharge_counter_d[stage2_bank] = WRITE_TO_PRECHARGE_DELAY;
+                        delay_before_precharge_counter_d[stage2_bank] = WRITE_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
                     end
                     for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the write to read delay applies to all banks (odt must be turned off properly before reading)
-                        delay_before_read_counter_d[index] = WRITE_TO_READ_DELAY + 1; //NOTE TO SELF: why plus 1?
+                        delay_before_read_counter_d[index] = WRITE_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0] + 'd1; //NOTE TO SELF: why plus 1?
                     end
-                    delay_before_write_counter_d[stage2_bank] = WRITE_TO_WRITE_DELAY;
+                    delay_before_write_counter_d[stage2_bank] = WRITE_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0];
                     //issue read command
                     if(DUAL_RANK_DIMM[0]) begin
                         if(COL_BITS <= 10) begin
@@ -1889,18 +1914,16 @@ module ddr3_controller #(
                 
                 //read request
                 else if(stage2_do_rd) begin     
-                    stage2_stall = 0;
                     ecc_stage2_stall = 0;
                     stage2_update = 1;
                     cmd_odt = 1'b0;
                     //set-up delay before precharge, read, and write
                     if(stage2_do_update_delay_before_precharge_after_rd) begin
-                        delay_before_precharge_counter_d[stage2_bank] = READ_TO_PRECHARGE_DELAY;
+                        delay_before_precharge_counter_d[stage2_bank] = READ_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
                     end
-                    delay_before_read_counter_d[stage2_bank] = READ_TO_READ_DELAY;     
-                    delay_before_write_counter_d[stage2_bank] = READ_TO_WRITE_DELAY + 1; //temporary solution since its possible odt to go high already while reading previously
+                    delay_before_read_counter_d[stage2_bank] = READ_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0];     
                     for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the read to write delay applies to all banks (odt must be turned on properly before writing and this delay is for ODT to settle)
-                        delay_before_write_counter_d[index] = READ_TO_WRITE_DELAY + 1; // NOTE TO SELF: why plus 1?
+                        delay_before_write_counter_d[index] = READ_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0] + 'd1; // NOTE TO SELF: why plus 1? temporary solution since its possible odt to go high already while reading previously
                     end
                     // don't acknowledge if ECC request
                     // higher shift_read_pipe means the earlier it will check data received from i_phy_iserdes_data
@@ -1952,7 +1975,7 @@ module ddr3_controller #(
                 // Thus stage 1 anticipate makes sure smooth burst operation that jumps banks
                 if(stage1_do_pre && !precharge_slot_busy) begin    
                     //set-up delay before read and write
-                    delay_before_activate_counter_d[stage1_next_bank] = PRECHARGE_TO_ACTIVATE_DELAY;
+                    delay_before_activate_counter_d[stage1_next_bank] = PRECHARGE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0];
                     if(DUAL_RANK_DIMM[0]) begin
                         cmd_d[PRECHARGE_SLOT] = {!stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_PRE[2:0], cmd_odt, cmd_ck_en, cmd_reset_n, stage1_next_bank[BA_BITS-1:0], { {{ROW_BITS-32'd11}{1'b0}} , 1'b0 , stage1_next_row[(DUAL_RANK_DIMM[0]? 9 : 8):0] } };
                     end
@@ -1966,19 +1989,19 @@ module ddr3_controller #(
                 else if(stage1_do_act && !activate_slot_busy) begin 
                     // must meet TRRD (activate to activate delay)
                     for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin //the activate to activate delay applies to all banks
-                        if(delay_before_activate_counter_d[index] <= ACTIVATE_TO_ACTIVATE_DELAY) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                            delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY;
+                        if(delay_before_activate_counter_d[index] <= ACTIVATE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0]) begin // if delay is > ACTIVATE_TO_ACTIVATE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                            delay_before_activate_counter_d[index] = ACTIVATE_TO_ACTIVATE_DELAY[$clog2(MAX_DELAY_BEFORE_ACTIVATE):0];
                         end
                     end
 
-                    delay_before_precharge_counter_d[stage1_next_bank] = ACTIVATE_TO_PRECHARGE_DELAY;
+                    delay_before_precharge_counter_d[stage1_next_bank] = ACTIVATE_TO_PRECHARGE_DELAY[$clog2(MAX_DELAY_BEFORE_PRECHARGE):0];
                     
                     //set-up delay before read and write
-                    if(delay_before_read_counter_d[stage1_next_bank] <= ACTIVATE_TO_READ_DELAY) begin  // if current delay is > ACTIVATE_TO_READ_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                        delay_before_read_counter_d[stage1_next_bank] = ACTIVATE_TO_READ_DELAY;
+                    if(delay_before_read_counter_d[stage1_next_bank] <= ACTIVATE_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0]) begin  // if current delay is > ACTIVATE_TO_READ_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                        delay_before_read_counter_d[stage1_next_bank] = ACTIVATE_TO_READ_DELAY[$clog2(MAX_DELAY_BEFORE_READ):0];
                     end
-                    if(delay_before_write_counter_d[stage1_next_bank] <= ACTIVATE_TO_WRITE_DELAY) begin  // if current delay is > ACTIVATE_TO_WRITE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
-                        delay_before_write_counter_d[stage1_next_bank] = ACTIVATE_TO_WRITE_DELAY;
+                    if(delay_before_write_counter_d[stage1_next_bank] <= ACTIVATE_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0]) begin  // if current delay is > ACTIVATE_TO_WRITE_DELAY, then updating it to the lower delay will cause the previous delay to be violated
+                        delay_before_write_counter_d[stage1_next_bank] = ACTIVATE_TO_WRITE_DELAY[$clog2(MAX_DELAY_BEFORE_WRITE):0];
                     end
                     if(DUAL_RANK_DIMM[0]) begin
                         cmd_d[ACTIVATE_SLOT] = {!stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)], CMD_ACT[2:0] , cmd_odt, cmd_ck_en, cmd_reset_n, stage1_next_bank[BA_BITS-1:0] , stage1_next_row[(DUAL_RANK_DIMM[0]? ROW_BITS-1 : ROW_BITS-2):0]}; 
@@ -1993,35 +2016,36 @@ module ddr3_controller #(
             end //end of stage1 anticipate
         end
 
-        // control stage 1 stall
-        if(stage1_pending) begin //raise stall only if stage2 will still be busy next clock
-            // Stage1 bank and row will determine if transaction will be
-            // stalled (bank is idle OR wrong row is active). 
-            if(!bank_status_d[stage1_bank] || (bank_status_d[stage1_bank] && bank_active_row_d[stage1_bank] != stage1_row)) begin 
-                stage1_stall = 1;
+        // control stage 1 stall in advance
+        if(stage1_pending) begin // raise stall only if stage2 will still be busy next clock
+            // stall stage 1 by default if there is pending request on stage 1
+            stage1_stall = 1; 
+            
+            if(bank_status_d[stage1_bank] && bank_active_row_d[stage1_bank] == stage1_row) begin 
+                // if write request and delay before write is already met then deassert stall
+                if(stage1_we && delay_before_write_counter_d[stage1_bank] == 0) begin 
+                    stage1_stall = 0;
+                end
+                // if read request and delay before read is already met then deassert stall 
+                else if(!stage1_we && delay_before_read_counter_d[stage1_bank] == 0) begin 
+                    stage1_stall = 0;
+                end
             end
-            else if(!stage1_we && delay_before_read_counter_d[stage1_bank] != 0) begin // if read request but delay before read is not yet met then stall
-                stage1_stall = 1;
-            end
-            else if(stage1_we && delay_before_write_counter_d[stage1_bank] != 0) begin // if write request but delay before write is not yet met then stall
-                stage1_stall = 1;
-            end
-            //different request type will need a delay of more than 1 clk cycle so stall the pipeline 
-            //if(stage1_we != stage2_we) begin
-            //    stage1_stall = 1;
-            //end
         end
 
-        //control stage 2 stall
+        //control stage 2 stall in advance
         if(stage2_pending) begin
-            //control stage2 stall in advance
-            if(bank_status_d[stage2_bank] &&  bank_active_row_d[stage2_bank] == stage2_row) begin //read/write operation
-                //write request
-                if(stage2_we && delay_before_write_counter_d[stage2_bank] == 0) begin // if write request and delay before write is already met then deassert stall
+            // by default, stage 2 stall deasserts once conditions for write/read command is met
+            stage2_stall = !(stage2_do_wr_or_rd && (stage2_do_wr || stage2_do_rd));
+            // equivalent to: if(bank_status_d[stage2_bank] &&  bank_active_row_d[stage2_bank] == stage2_row)
+            // can start read/write operation if right row is active on the bank
+            if(stage2_do_act || stage2_do_wr_or_rd) begin 
+                // if write request and delay before write is already met then deassert stall
+                if(stage2_we && delay_before_write_counter_d[stage2_bank] == 0) begin 
                     stage2_stall = 0; //to low stall next stage, but not yet at this stage
                 end
-                //read request
-                else if(!stage2_we && delay_before_read_counter_d[stage2_bank]==0) begin // if read request and delay before read is already met then deassert stall 
+                // if read request and delay before read is already met then deassert stall
+                else if(!stage2_we && delay_before_read_counter_d[stage2_bank]==0) begin  
                     stage2_stall = 0;
                 end
             end
@@ -2394,6 +2418,8 @@ module ddr3_controller #(
             read_data_store <= 0;
             write_pattern <= 0;
             write_pattern_lane <= 0;
+            read_lane_data_shifted <= 0;
+            write_pattern_matches <= 0;
             added_read_pipe_max <= 0;
             dqs_start_index_stored <= 0;
             dqs_start_index_repeat <= 0;        
@@ -2652,8 +2678,8 @@ module ddr3_controller #(
         CALIBRATE_DQS: if(dqs_start_index_stored == dqs_target_index) begin
                             // dq_target_index still stores the original dqs_target_index_value. The bit size of dq_target_index is just enough
                             // to count the bits in dqs_store (the received 8 DQS stored STORED_DQS_SIZE times)
-                            added_read_pipe[lane] <= { {( 4 - ($clog2(STORED_DQS_SIZE*8) - (3+1)) ){1'b0}} , dq_target_index[lane][$clog2(STORED_DQS_SIZE*8)-1:(3+1)] } 
-                                                        + { 3'b0 , (dq_target_index[lane][3:0] >= (5+8)) };
+                            added_read_pipe[lane] <= |({ {( 4 - ($clog2(STORED_DQS_SIZE*8) - (3+1)) ){1'b0}} , dq_target_index[lane][$clog2(STORED_DQS_SIZE*8)-1:(3+1)] } 
+                                                        + { 3'b0 , (dq_target_index[lane][3:0] >= (5+8)) })? 'd1 : 'd0; // added_read_pipe can just be 1 or 0
                             // if target_index is > 13, then a 1 CONTROLLLER_CLK cycle delay (4 ddr3_clk cycles) is added on that particular lane (due to trace delay)
                             // added_read_pipe[lane] <= dq_target_index[lane][$clog2(STORED_DQS_SIZE*8)-1 : (4)]  +  ( dq_target_index[lane][3:0] >= 13 ) ;
                             dqs_bitslip_arrangement <= 16'b0011_1100_0011_1100 >> dq_target_index[lane][2:0];
@@ -2753,73 +2779,75 @@ module ddr3_controller #(
                             pause_counter <= 0;
                         end
 
-    WAIT_FOR_FEEDBACK: if(delay_before_write_level_feedback == 0) begin
-                            /* verilator lint_off WIDTH */ //_verilator warning: Bit extraction of var[511:0] requires 9 bit index, not 3 bits (but [lane<<3] is much simpler and cleaner)
-                            sample_clk_repeat <= (i_phy_iserdes_data[lane_times_8] == stored_write_level_feedback)? sample_clk_repeat + 1 : 0; //sample_clk_repeat should get the same response 
-                            stored_write_level_feedback <= i_phy_iserdes_data[lane_times_8];
-                            write_calib_dqs <= 0;
-                            if(sample_clk_repeat == REPEAT_CLK_SAMPLING) begin
-                                sample_clk_repeat <= 0;
-                                prev_write_level_feedback <= stored_write_level_feedback;
-                                if(({prev_write_level_feedback, stored_write_level_feedback} == 2'b01) /*|| write_level_fail[lane]*/) begin
-                                    /* verilator lint_on WIDTH */
-                                    /* verilator lint_off WIDTH */
-                                    if(lane == LANES - 1) begin
-                                    /* verilator lint_on WIDTH */
-                                            write_calib_odt <= 0;
-                                            pause_counter <= 0; //write calibration now complete so continue the reset instruction sequence
-                                            lane <= 0;
-                                            o_phy_write_leveling_calib <= 0;
-                                            state_calibrate <= ISSUE_WRITE_1;
+    WAIT_FOR_FEEDBACK:  if(ODELAY_SUPPORTED) begin
+                            if(delay_before_write_level_feedback == 0) begin
+                                /* verilator lint_off WIDTH */ //_verilator warning: Bit extraction of var[511:0] requires 9 bit index, not 3 bits (but [lane<<3] is much simpler and cleaner)
+                                sample_clk_repeat <= (i_phy_iserdes_data[lane_times_8] == stored_write_level_feedback)? sample_clk_repeat + 1 : 0; //sample_clk_repeat should get the same response 
+                                stored_write_level_feedback <= i_phy_iserdes_data[lane_times_8];
+                                write_calib_dqs <= 0;
+                                if(sample_clk_repeat == REPEAT_CLK_SAMPLING) begin
+                                    sample_clk_repeat <= 0;
+                                    prev_write_level_feedback <= stored_write_level_feedback;
+                                    if(({prev_write_level_feedback, stored_write_level_feedback} == 2'b01) /*|| write_level_fail[lane]*/) begin
+                                        /* verilator lint_on WIDTH */
+                                        /* verilator lint_off WIDTH */
+                                        if(lane == LANES - 1) begin
+                                        /* verilator lint_on WIDTH */
+                                                write_calib_odt <= 0;
+                                                pause_counter <= 0; //write calibration now complete so continue the reset instruction sequence
+                                                lane <= 0;
+                                                o_phy_write_leveling_calib <= 0;
+                                                state_calibrate <= ISSUE_WRITE_1;
+                                                `ifdef UART_DEBUG_WRITE_LEVEL
+                                                    uart_start_send <= 1'b1;
+                                                    uart_text <= {"state=WAIT_FOR_FEEDBACK, All Lanes Done",8'h0a,"----------------------",8'h0a};
+                                                    state_calibrate <= WAIT_UART;
+                                                    state_calibrate_next <= ISSUE_WRITE_1;
+                                                `endif
+                                        end
+                                        else begin
+                                            lane <= lane + 1;
+                                            odelay_cntvalue_halfway <= 0;
+                                            prev_write_level_feedback <= 1'b1;
+                                            sample_clk_repeat <= 0;
+                                            state_calibrate <= START_WRITE_LEVEL; 
                                             `ifdef UART_DEBUG_WRITE_LEVEL
                                                 uart_start_send <= 1'b1;
-                                                uart_text <= {"state=WAIT_FOR_FEEDBACK, All Lanes Done",8'h0a,"----------------------",8'h0a};
+                                                uart_text <= {"state=WAIT_FOR_FEEDBACK, Done lane=",hex_to_ascii(lane),8'h0a,"----------------------",8'h0a};
                                                 state_calibrate <= WAIT_UART;
-                                                state_calibrate_next <= ISSUE_WRITE_1;
+                                                state_calibrate_next <= START_WRITE_LEVEL;
                                             `endif
+                                        end
                                     end
                                     else begin
-                                        lane <= lane + 1;
-                                        odelay_cntvalue_halfway <= 0;
-                                        prev_write_level_feedback <= 1'b1;
-                                        sample_clk_repeat <= 0;
+                                        o_phy_odelay_data_ld[lane] <= 1;
+                                        o_phy_odelay_dqs_ld[lane] <= 1;
+                                        write_level_fail[lane] <= odelay_cntvalue_halfway;
+                                        // if(odelay_cntvalue_halfway) begin // if halfway cntvalue is reached which is illegal (or impossible to happen), then we load the original cntvalues
+                                        //     odelay_data_cntvaluein[lane] <= DATA_INITIAL_ODELAY_TAP[4:0];
+                                        //     odelay_dqs_cntvaluein[lane] <= DQS_INITIAL_ODELAY_TAP[4:0];                
+                                        // end
                                         state_calibrate <= START_WRITE_LEVEL; 
                                         `ifdef UART_DEBUG_WRITE_LEVEL
                                             uart_start_send <= 1'b1;
-                                            uart_text <= {"state=WAIT_FOR_FEEDBACK, Done lane=",hex_to_ascii(lane),8'h0a,"----------------------",8'h0a};
+                                            uart_text <= {"state=WAIT_FOR_FEEDBACK, lane=",hex_to_ascii(lane), ", {prev,stored}=", hex_to_ascii(prev_write_level_feedback),
+                                                hex_to_ascii(stored_write_level_feedback), ", o_phy_odelay_data_cntvaluein=0x", hex_to_ascii(o_phy_odelay_data_cntvaluein[4]),
+                                                hex_to_ascii(o_phy_odelay_data_cntvaluein[3:0]), 8'h0a,8'h0a};
                                             state_calibrate <= WAIT_UART;
                                             state_calibrate_next <= START_WRITE_LEVEL;
                                         `endif
                                     end
-                                end
-                                else begin
-                                    o_phy_odelay_data_ld[lane] <= 1;
-                                    o_phy_odelay_dqs_ld[lane] <= 1;
-                                    write_level_fail[lane] <= odelay_cntvalue_halfway;
-                                    // if(odelay_cntvalue_halfway) begin // if halfway cntvalue is reached which is illegal (or impossible to happen), then we load the original cntvalues
-                                    //     odelay_data_cntvaluein[lane] <= DATA_INITIAL_ODELAY_TAP[4:0];
-                                    //     odelay_dqs_cntvaluein[lane] <= DQS_INITIAL_ODELAY_TAP[4:0];                
-                                    // end
-                                    state_calibrate <= START_WRITE_LEVEL; 
-                                    `ifdef UART_DEBUG_WRITE_LEVEL
-                                        uart_start_send <= 1'b1;
-                                        uart_text <= {"state=WAIT_FOR_FEEDBACK, lane=",hex_to_ascii(lane), ", {prev,stored}=", hex_to_ascii(prev_write_level_feedback),
-                                            hex_to_ascii(stored_write_level_feedback), ", o_phy_odelay_data_cntvaluein=0x", hex_to_ascii(o_phy_odelay_data_cntvaluein[4]),
-                                            hex_to_ascii(o_phy_odelay_data_cntvaluein[3:0]), 8'h0a,8'h0a};
-                                        state_calibrate <= WAIT_UART;
-                                        state_calibrate_next <= START_WRITE_LEVEL;
-                                    `endif
-                                end
-                             end     
-                        `ifdef UART_DEBUG_WRITE_LEVEL
-                             else begin
-                                    uart_start_send <= 1'b1;
-                                    uart_text <= {"state=WAIT_FOR_FEEDBACK, sample_clk_repeat=",hex_to_ascii(sample_clk_repeat),8'h0a};
-                                    state_calibrate <= WAIT_UART;
-                                    state_calibrate_next <= START_WRITE_LEVEL;
-                             end
-                        `endif
-                         end
+                                end     
+                                `ifdef UART_DEBUG_WRITE_LEVEL
+                                    else begin
+                                            uart_start_send <= 1'b1;
+                                            uart_text <= {"state=WAIT_FOR_FEEDBACK, sample_clk_repeat=",hex_to_ascii(sample_clk_repeat),8'h0a};
+                                            state_calibrate <= WAIT_UART;
+                                            state_calibrate_next <= START_WRITE_LEVEL;
+                                    end
+                                 `endif
+                            end
+                        end
                             
         ISSUE_WRITE_1: if(instruction_address == 22 && !o_wb_stall_calib) begin
                         calib_stb <= 1;//actual request flag
@@ -2910,74 +2938,74 @@ module ddr3_controller #(
                             // end
                       end
 
-        ANALYZE_DATA_LOW_FREQ: begin // read_data_store should have the expected 9177298cd0ad51c1, if not then issue bitslip
-            if(write_pattern[0 +: 64] == {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] }) begin 
-                    /* verilator lint_off WIDTH */
-                    if(lane == LANES - 1) begin
-                    /* verilator lint_on WIDTH */
-                        state_calibrate <= BIST_MODE == 0? FINISH_READ : BURST_WRITE; // go straight to FINISH_READ if BIST_MODE == 0
-                        initial_calibration_done <= 1'b1;
-                        `ifdef UART_DEBUG_ALIGN
-                            uart_start_send <= 1'b1;
-                            //uart_text <= {"state=ANALYZE_DATA_LOW_FREQ, Done All Lanes",8'h0a,"-----------------",8'h0a,8'h0a};
-                            uart_text <= {8'h0a,8'h0a, "Done All Lanes, bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
-                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
-                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
-                                8'h0a,8'h0a,8'h0a,8'h0a};
-                            state_calibrate <= WAIT_UART;
-                            state_calibrate_next <= BIST_MODE == 0? FINISH_READ : BURST_WRITE;
-                        `endif
-                    end        
-                    else begin
-                        lane <= lane + 1;
-                        bitslip_counter <= 0;
-                        `ifdef UART_DEBUG_ALIGN
-                            uart_start_send <= 1'b1;
-                            // uart_text <= {"state=ANALYZE_DATA_LOW_FREQ, Done lane=",hex_to_ascii(lane),8'h0a,"-----------------",8'h0a};
-                            uart_text <= {8'h0a,8'h0a, "Done lane=", hex_to_ascii(lane), ", bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
-                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
-                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
-                                8'h0a,8'h0a,8'h0a,8'h0a};
-                            state_calibrate <= WAIT_UART;
-                            state_calibrate_next <= ANALYZE_DATA_LOW_FREQ;
-                        `endif
-                    end
-            end
-            else begin // issue bitslip then repeat write-read
-                o_phy_bitslip[lane] <= 1'b1;
-                bitslip_counter <= bitslip_counter + 1; // increment counter every bitslip
-                if(bitslip_counter == 7) begin // there are only 8 bitslip, once past this then we shift read pipe backwards (assumption is that we read too early)
-                    shift_read_pipe <= shift_read_pipe + 1;
-                    bitslip_counter <= 0;
-                    if(shift_read_pipe == 1) begin // if shift_read_pipe at end then we increase data_start_index since problem might be write DQ too early thus we shift it later using data_start_index 
-                         shift_read_pipe <= 0;
-                         data_start_index[lane] <= lane_write_dq_late[lane]? data_start_index[lane] - 8: data_start_index[lane] + 8;
-                         if((data_start_index[lane] == 64) && !lane_write_dq_late[lane]) begin // if data_start_index at end then we assert data_start_index, last assumption is that we are writing DQ too late thus we move stage2_data forward to be sent out earlier
-                            data_start_index[lane] <= 64;
-                            lane_write_dq_late[lane] <= 1'b1;
-                         end
-                    end
-                end
-                state_calibrate <= ISSUE_WRITE_1;
-                `ifdef UART_DEBUG_ALIGN
-                    uart_start_send <= 1'b1;
-                    uart_text <= {8'h0a,8'h0a, "lane=", hex_to_ascii(lane), ", bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
-                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
-                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
-                                8'h0a,8'h0a,8'h0a,8'h0a};
-                    state_calibrate <= WAIT_UART;
-                    state_calibrate_next <= ISSUE_WRITE_1;
-                `endif
-            end
-        end
+ANALYZE_DATA_LOW_FREQ: if(DLL_OFF) begin // read_data_store should have the expected 9177298cd0ad51c1, if not then issue bitslip
+                            if(write_pattern[0 +: 64] == {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
+                                        read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
+                                        read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] }) begin 
+                                    /* verilator lint_off WIDTH */
+                                    if(lane == LANES - 1) begin
+                                    /* verilator lint_on WIDTH */
+                                        state_calibrate <= BIST_MODE == 0? FINISH_READ : BURST_WRITE; // go straight to FINISH_READ if BIST_MODE == 0
+                                        initial_calibration_done <= 1'b1;
+                                        `ifdef UART_DEBUG_ALIGN
+                                            uart_start_send <= 1'b1;
+                                            //uart_text <= {"state=ANALYZE_DATA_LOW_FREQ, Done All Lanes",8'h0a,"-----------------",8'h0a,8'h0a};
+                                            uart_text <= {8'h0a,8'h0a, "Done All Lanes, bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
+                                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
+                                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
+                                                8'h0a,8'h0a,8'h0a,8'h0a};
+                                            state_calibrate <= WAIT_UART;
+                                            state_calibrate_next <= BIST_MODE == 0? FINISH_READ : BURST_WRITE;
+                                        `endif
+                                    end        
+                                    else begin
+                                        lane <= lane + 1;
+                                        bitslip_counter <= 0;
+                                        `ifdef UART_DEBUG_ALIGN
+                                            uart_start_send <= 1'b1;
+                                            // uart_text <= {"state=ANALYZE_DATA_LOW_FREQ, Done lane=",hex_to_ascii(lane),8'h0a,"-----------------",8'h0a};
+                                            uart_text <= {8'h0a,8'h0a, "Done lane=", hex_to_ascii(lane), ", bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
+                                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
+                                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
+                                                8'h0a,8'h0a,8'h0a,8'h0a};
+                                            state_calibrate <= WAIT_UART;
+                                            state_calibrate_next <= ANALYZE_DATA_LOW_FREQ;
+                                        `endif
+                                    end
+                            end
+                            else begin // issue bitslip then repeat write-read
+                                o_phy_bitslip[lane] <= 1'b1;
+                                bitslip_counter <= bitslip_counter + 1; // increment counter every bitslip
+                                if(bitslip_counter == 7) begin // there are only 8 bitslip, once past this then we shift read pipe backwards (assumption is that we read too early)
+                                    shift_read_pipe <= shift_read_pipe + 1;
+                                    bitslip_counter <= 0;
+                                    if(shift_read_pipe == 1) begin // if shift_read_pipe at end then we increase data_start_index since problem might be write DQ too early thus we shift it later using data_start_index 
+                                        shift_read_pipe <= 0;
+                                        data_start_index[lane] <= lane_write_dq_late[lane]? data_start_index[lane] - 8: data_start_index[lane] + 8;
+                                        if((data_start_index[lane] == 64) && !lane_write_dq_late[lane]) begin // if data_start_index at end then we assert data_start_index, last assumption is that we are writing DQ too late thus we move stage2_data forward to be sent out earlier
+                                            data_start_index[lane] <= 64;
+                                            lane_write_dq_late[lane] <= 1'b1;
+                                        end
+                                    end
+                                end
+                                state_calibrate <= ISSUE_WRITE_1;
+                                `ifdef UART_DEBUG_ALIGN
+                                    uart_start_send <= 1'b1;
+                                    uart_text <= {8'h0a,8'h0a, "lane=", hex_to_ascii(lane), ", bitslip_counter=", hex_to_ascii(bitslip_counter), ", shift_read_pipe=", hex_to_ascii(shift_read_pipe), 
+                                            ", data_start_index=", hex8_to_ascii(data_start_index[lane]), ", lane_late=", hex_to_ascii(lane_write_dq_late[lane]), 8'h0a,8'h0a, 
+                                            {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
+                                            read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] },
+                                                8'h0a,8'h0a,8'h0a,8'h0a};
+                                    state_calibrate <= WAIT_UART;
+                                    state_calibrate_next <= ISSUE_WRITE_1;
+                                `endif
+                            end
+                        end
 
                         // extract burst_0-to-burst_7 data for a specified lane then determine which byte in write_pattern does it starts (ASSUMPTION: the DQ is too early [3d_9177298cd0ad51]c1 is written)
                         // NOTE TO SELF: all "8" here assume DQ_BITS are 8? parameterize this properly
@@ -2986,8 +3014,8 @@ module ddr3_controller #(
                         // e.g. LANE={burst7, burst6, burst5, burst4, burst3, burst2, burst1, burst0} then with 1 ddr3 cycle delay between DQ and command 
                         // burst0 will not be written but only starting on burst1
                         // if lane_write_dq_late is already set to 1 for this lane, then current lane should already be fixed without changing the data_start_index
-        ANALYZE_DATA:   if(prep_done) begin
-                            if(write_pattern_lane == read_lane_data) begin   
+        ANALYZE_DATA:   if(prep_done[1]) begin
+                            if(write_pattern_matches) begin   
                                 /* verilator lint_off WIDTH */
                                 if(lane == LANES - 1) begin
                                 /* verilator lint_on WIDTH */
@@ -3068,12 +3096,12 @@ module ddr3_controller #(
                             end     
                         end
                         else begin
-                            prep_done <= 1;
+                            prep_done <= {prep_done[0],1'b1};
                         end
 
                       // check when the 4 MSB of write_pattern {d0ad51c1} starts on read_lane_data (read_lane_data is just the concatenation of read_data_store of a specific lane)
                       // assumption here read_lane_data ~= 298cd0ad51c1XXXX is written: either because we write too late (thus we need to delay outgoing stage2_data) OR we read too early (thus we need to calibrate incoming iserdes_dq)
- CHECK_STARTING_DATA: if(prep_done) begin
+ CHECK_STARTING_DATA: if(prep_done[1]) begin
                             /* verilator lint_off WIDTHTRUNC */
                             if(read_lane_data_shifted == write_pattern[0 +: 32]) begin
                             /* verilator lint_on WIDTHTRUNC */
@@ -3093,8 +3121,8 @@ module ddr3_controller #(
                                 else begin 
                                     lane_read_dq_early[lane] <= 1'b1; // set to 1 to see later what lanes has this problem
                                     state_calibrate <= BITSLIP_DQS_TRAIN_3;
-                                    added_read_pipe[lane] <= { {( 4 - ($clog2(STORED_DQS_SIZE*8) - (3+1)) ){1'b0}} , dq_target_index[lane][$clog2(STORED_DQS_SIZE*8)-1:(3+1)] } 
-                                                                + { 3'b0 , (dq_target_index[lane][3:0] >= (5+8)) };
+                                    added_read_pipe[lane] <= |({ {( 4 - ($clog2(STORED_DQS_SIZE*8) - (3+1)) ){1'b0}} , dq_target_index[lane][$clog2(STORED_DQS_SIZE*8)-1:(3+1)] } 
+                                                                + { 3'b0 , (dq_target_index[lane][3:0] >= (5+8)) })? 'd1 : 'd0; // added_read_pipe can just be 1 or 0
                                     dqs_bitslip_arrangement <= 16'b0011_1100_0011_1100 >> dq_target_index[lane][2:0];
                                     `ifdef UART_DEBUG_ALIGN
                                         uart_start_send <= 1'b1;
@@ -3135,7 +3163,7 @@ module ddr3_controller #(
                             end
                         end
                     else begin
-                        prep_done <= 1;
+                        prep_done <= {prep_done[0],1'b1};
                     end
       
 BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to capture the DQ correctly
@@ -3358,6 +3386,7 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib) begin
                         read_data_store[((DQ_BITS*LANES)*2 + ({29'd0, lane}<<3)) +: 8],read_data_store[((DQ_BITS*LANES)*1 + ({29'd0, lane}<<3)) +: 8],read_data_store[((DQ_BITS*LANES)*0 + ({29'd0, lane}<<3)) +: 8] };
             write_pattern_lane <= write_pattern[ (lane_write_dq_late[lane]? 0 : data_start_index[lane])  +: 64];
             read_lane_data_shifted <= read_lane_data[start_index_check +: 32];
+            write_pattern_matches <= write_pattern_lane == read_lane_data;
 
              //halfway value has been reached (illegal) and will go back to zero at next load
              if(odelay_data_cntvaluein[lane] == 15) begin
