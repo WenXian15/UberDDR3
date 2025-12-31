@@ -22,18 +22,18 @@ module clk_wiz
     .COMPENSATION         ("INTERNAL"),
     .STARTUP_WAIT         ("FALSE"),
     .DIVCLK_DIVIDE        (1),
-    .CLKFBOUT_MULT        (10), // 100 MHz * 10 = 1000 MHz
+    .CLKFBOUT_MULT        (12), // 100 MHz * 12 = 1200 MHz
     .CLKFBOUT_PHASE       (0.000),
-    .CLKOUT0_DIVIDE       (12), // 1000 MHz / 12 = 83.333 MHz
+    .CLKOUT0_DIVIDE       (12), // 1200 MHz / 12 = 100 MHz
     .CLKOUT0_PHASE        (0.000),
     .CLKOUT0_DUTY_CYCLE   (0.500),
-    .CLKOUT1_DIVIDE       (3), // 1000 MHz / 3 = 333.333 MHz
+    .CLKOUT1_DIVIDE       (3), // 1200 MHz / 3 = 400 MHz
     .CLKOUT1_PHASE        (0.000),
     .CLKOUT1_DUTY_CYCLE   (0.500),
-    .CLKOUT2_DIVIDE       (5), // 1000 MHz / 5 = 200 MHz
+    .CLKOUT2_DIVIDE       (6), // 1200 MHz / 6 = 200 MHz
     .CLKOUT2_PHASE        (0.000),
     .CLKOUT2_DUTY_CYCLE   (0.500),
-    .CLKOUT3_DIVIDE       (3), // 1000 MHz / 3 = 333.333 MHz, 90 phase
+    .CLKOUT3_DIVIDE       (3), // 1200 MHz / 3 = 400 MHz, 90 phase
     .CLKOUT3_PHASE        (90.000),
     .CLKOUT3_DUTY_CYCLE   (0.500),
     .CLKIN1_PERIOD        (10.000) // 100 MHz input
