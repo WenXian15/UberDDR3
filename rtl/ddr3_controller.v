@@ -428,11 +428,12 @@ module ddr3_controller #(
 
     /************************************************************* Registers and Wires *************************************************************/
     integer index;
-    (* mark_debug ="true" *) reg[4:0] instruction_address = 0; //address for accessing rom instruction
-    reg[27:0] instruction = INITIAL_RESET_INSTRUCTION; //instruction retrieved from reset instruction rom
-    reg[ DELAY_COUNTER_WIDTH - 1:0] delay_counter = INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0]; //counter used for delays
-    reg delay_counter_is_zero = (INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0] == 0); //counter is now zero so retrieve next delay
-    reg reset_done = 0; //high if reset has already finished
+    (* mark_debug ="true" *) reg[4:0] instruction_address = 0, instruction_address_d; //address for accessing rom instruction
+    reg[27:0] instruction = INITIAL_RESET_INSTRUCTION, instruction_d; //instruction retrieved from reset instruction rom
+    reg[ DELAY_COUNTER_WIDTH - 1:0] delay_counter = INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0], delay_counter_d; //counter used for delays
+    reg delay_counter_is_zero = (INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0] == 0), delay_counter_is_zero_d; //counter is now zero so retrieve next delay
+    reg reset_done = 0, reset_done_d; //high if reset has already finished
+    reg precharge_all_instruction, precharge_all_instruction_d;
     reg pause_counter = 0;
     wire issue_read_command;
     reg stage2_update = 1;
@@ -444,9 +445,9 @@ module ddr3_controller #(
 
     // ECC_ENABLE = 3 regs
     /* verilator lint_off UNUSEDSIGNAL */
-    reg[BA_BITS-1:0] ecc_bank_addr = 0, ecc_bank_addr_prev = 0;
-    reg[ROW_BITS-1:0] ecc_row_addr = 0, ecc_row_addr_prev = 0;
-    reg[COL_BITS-1:0] ecc_col_addr = 0, ecc_col_addr_prev = 0;
+    reg[BA_BITS-1:0] ecc_bank_addr = 0, ecc_bank_addr_prev = 0, ecc_bank_addr_d, ecc_bank_addr_prev_d;
+    reg[ROW_BITS-1:0] ecc_row_addr = 0, ecc_row_addr_prev = 0, ecc_row_addr_d, ecc_row_addr_prev_d;
+    reg[COL_BITS-1:0] ecc_col_addr = 0, ecc_col_addr_prev = 0, ecc_col_addr_d, ecc_col_addr_prev_d;
     reg we_prev;
     reg stage0_pending = 0;
     reg[wb_addr_bits - 1:0] stage0_addr = 0;
@@ -472,37 +473,37 @@ module ddr3_controller #(
     reg[wb_sel_bits - 1 : 0] stage2_ecc_write_data_mask_q = 0, stage2_ecc_write_data_mask_d;
     wire[wb_data_bits/8 - 1 : 0] decoded_parity;
     wire[wb_data_bits/8 - 1 : 0] encoded_parity;
-    reg[wb_data_bits/8 - 1 : 0] stage2_encoded_parity = 0;
+    reg[wb_data_bits/8 - 1 : 0] stage2_encoded_parity = 0, stage2_encoded_parity_d;
     reg ecc_req_stage2 = 0;
     /* verilator lint_on UNUSEDSIGNAL */
 
     //pipeline stage 1 regs
-    reg stage1_pending = 0;
-    reg[AUX_WIDTH-1:0] stage1_aux = 0;
-    reg stage1_we = 0;
-    reg[wb_data_bits - 1:0] stage1_data = 0;
+    reg stage1_pending = 0, stage1_pending_d;
+    reg[AUX_WIDTH-1:0] stage1_aux = 0, stage1_aux_d;
+    reg stage1_we = 0, stage1_we_d;
+    reg[wb_data_bits - 1:0] stage1_data = 0, stage1_data_d;
     wire[wb_data_bits - 1:0] stage1_data_mux, stage1_data_encoded;
-    reg[wb_sel_bits - 1:0] stage1_dm = 0;
-    reg[COL_BITS-1:0] stage1_col = 0;
-    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_bank = 0;
-    reg[ROW_BITS-1:0] stage1_row = 0;
-    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_next_bank = 0;
-    reg[ROW_BITS-1:0] stage1_next_row = 0;
+    reg[wb_sel_bits - 1:0] stage1_dm = 0, stage1_dm_d;
+    reg[COL_BITS-1:0] stage1_col = 0, stage1_col_d;
+    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_bank = 0, stage1_bank_d;
+    reg[ROW_BITS-1:0] stage1_row = 0, stage1_row_d;
+    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage1_next_bank = 0, stage1_next_bank_d;
+    reg[ROW_BITS-1:0] stage1_next_row = 0, stage1_next_row_d;
     wire[wb_addr_bits-1:0] wb_addr_plus_anticipate, calib_addr_plus_anticipate;
 
     //pipeline stage 2 regs
-    reg stage2_pending = 0;
-    reg[AUX_WIDTH-1:0] stage2_aux = 0;
-    reg stage2_we = 0;
-    reg[wb_sel_bits - 1:0] stage2_dm_unaligned = 0, stage2_dm_unaligned_temp = 0;
+    reg stage2_pending = 0, stage2_pending_d;
+    reg[AUX_WIDTH-1:0] stage2_aux = 0, stage2_aux_d;
+    reg stage2_we = 0, stage2_we_d;
+    reg[wb_sel_bits - 1:0] stage2_dm_unaligned = 0, stage2_dm_unaligned_temp = 0, stage2_dm_unaligned_d, stage2_dm_unaligned_temp_d;
     reg[wb_sel_bits - 1:0] stage2_dm[STAGE2_DATA_DEPTH-1:0];
-    reg[wb_data_bits - 1:0] stage2_data_unaligned = 0, stage2_data_unaligned_temp = 0;
+    reg[wb_data_bits - 1:0] stage2_data_unaligned = 0, stage2_data_unaligned_temp = 0, stage2_data_unaligned_d, stage2_data_unaligned_temp_d;
     reg[wb_data_bits - 1:0] stage2_data[STAGE2_DATA_DEPTH-1:0];
     reg [DQ_BITS*8 - 1:0] unaligned_data[LANES-1:0];
     reg [8 - 1:0] unaligned_dm[LANES-1:0];
-    reg[COL_BITS-1:0] stage2_col = 0;
-    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage2_bank = 0;
-    reg[ROW_BITS-1:0] stage2_row = 0;
+    reg[COL_BITS-1:0] stage2_col = 0, stage2_col_d;
+    reg[BA_BITS-1+DUAL_RANK_DIMM:0] stage2_bank = 0, stage2_bank_d;
+    reg[ROW_BITS-1:0] stage2_row = 0, stage2_row_d;
     
     //delay counter for every banks
     reg[3:0] delay_before_precharge_counter_q[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0], delay_before_precharge_counter_d[(1<<(BA_BITS+DUAL_RANK_DIMM))-1:0]; //delay counters
@@ -838,59 +839,87 @@ module ddr3_controller #(
     
     always @(posedge i_controller_clk) begin
         if(sync_rst_controller) begin
-            instruction_address <= 0;
             `ifdef FORMAL_COVER
                 instruction_address <= 21;
+            `else
+                instruction_address <= 0;
             `endif
             instruction <= INITIAL_RESET_INSTRUCTION;
             delay_counter <= INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0];
             delay_counter_is_zero <= (INITIAL_RESET_INSTRUCTION[DELAY_COUNTER_WIDTH - 1:0] == 0);
             reset_done <= 1'b0;
+            precharge_all_instruction <= 1'b0;
         end
         else begin 
+            instruction_address <= instruction_address_d;
+            instruction <= instruction_d;
+            delay_counter <= delay_counter_d;
+            delay_counter_is_zero <= delay_counter_is_zero_d;
+            reset_done <= reset_done_d;
+            precharge_all_instruction <= precharge_all_instruction_d;
+        end
+    end
+
+    always @* begin
+        instruction_address_d = instruction_address;
+        instruction_d = instruction;
+        delay_counter_d = delay_counter;
+        delay_counter_is_zero_d = delay_counter_is_zero;
+        reset_done_d = reset_done;
+
             //update counter after reaching zero
             if(delay_counter_is_zero) begin 
-                delay_counter <= instruction[DELAY_COUNTER_WIDTH - 1:0]; //retrieve delay value of current instruction, we count to zero thus minus 1
+            //retrieve delay value of current instruction, we count to zero thus minus 1
+            delay_counter_d = instruction[DELAY_COUNTER_WIDTH - 1:0]; 
             end
-            
             //else: decrement delay counter when current instruction needs delay
             //don't decrement (has infinite time) when last bit of
             //delay_counter is 1 (for r/w calibration and prestall delay)
             //address will only move forward for these kinds of delay only
             //when skip_reset_seq_delay is toggled
-            else if(instruction[USE_TIMER] /*&& delay_counter != {(DELAY_COUNTER_WIDTH){1'b1}}*/ && !pause_counter && delay_counter != 0) delay_counter <= delay_counter - 1; 
+        else if(instruction[USE_TIMER] /*&& delay_counter != {(DELAY_COUNTER_WIDTH){1'b1}}*/ && !pause_counter && delay_counter != 0) begin
+            delay_counter_d = delay_counter - 1; 
+        end
             
             //delay_counter of 1 means we will need to update the delay_counter next clock cycle (delay_counter of zero) so we need to retrieve 
             //now the next instruction. The same thing needs to be done when current instruction does not need the timer delay.
             if( ((delay_counter == 1) && !pause_counter) || !instruction[USE_TIMER]/* || skip_reset_seq_delay*/) begin
-                delay_counter_is_zero <= 1; 
-                instruction <= read_rom_instruction(instruction_address);
-                if(instruction_address == 5'd22) begin // if user_self_refresh is disabled, wrap back to 19 (Precharge All before Refresh)
-                    instruction_address <= 5'd19;
+            delay_counter_is_zero_d = 1; 
+            instruction_d = read_rom_instruction(instruction_address);
+            if(instruction_address == 5'd22) begin 
+                // if user_self_refresh is disabled, wrap back to 19 (Precharge All before Refresh)
+                instruction_address_d = 5'd19;
                 end
-                else if(instruction_address == 5'd26) begin // self-refresh exit always wraps back to 20 (Refresh)
-                    instruction_address <= 5'd20;
+            else if(instruction_address == 5'd26) begin 
+                // self-refresh exit always wraps back to 20 (Refresh)
+                instruction_address_d = 5'd20;
                 end
                 else begin
-                    instruction_address <= instruction_address + 5'd1; // just increment address
+                // just increment address
+                instruction_address_d = instruction_address + 5'd1; // just increment address
                 end
             end
             //we are now on the middle of a delay 
             else begin
-                delay_counter_is_zero <=0; 
+            delay_counter_is_zero_d =0; 
             end
 
-            if(instruction_address == 5'd22 && user_self_refresh_q) begin // if user_self_refresh is enabled, go straight to 23
-                instruction_address <= 23; // go to Precharge All for Self-refresh
-                delay_counter_is_zero <= 1; 
-                delay_counter <= 0;
-                instruction <= read_rom_instruction(instruction_address);
+        // if user_self_refresh is enabled, go straight to 23
+        if(instruction_address == 5'd22 && user_self_refresh_q) begin 
+            // go to Precharge All for Self-refresh (23)
+            instruction_address_d = 23; 
+            delay_counter_is_zero_d = 1; 
+            delay_counter_d = 0;
+            instruction_d = read_rom_instruction(instruction_address);
             end
 
             //instruction[RST_DONE] is non-persistent thus we need to register it once it goes high
-            reset_done <= instruction[RST_DONE]? 1'b1:reset_done; 
-        end
+        reset_done_d = instruction[RST_DONE]? 1 : reset_done; 
+
+        // instruction is at precharge all (20 or 24)
+        precharge_all_instruction_d = instruction_address_d == 20 || instruction_address_d == 24;
     end
+    
 
     // register user-enabled self-refresh
     always @(posedge i_controller_clk) begin 
@@ -900,7 +929,6 @@ module ddr3_controller #(
                 user_self_refresh_q <= 1'b1;
             end 
         end
-
     end
     /*********************************************************************************************************************************************/
 
@@ -965,275 +993,68 @@ module ddr3_controller #(
                 stage2_data[index] <=  0;               
                 stage2_dm[index] <= 0;
             end
+            for(index=0; index<LANES; index=index+1) begin
+                unaligned_data[index] <= 0;
+                unaligned_dm[index] <= 0;
+            end
         end
         
-        // can only start accepting requests  when reset is done
-        else if(reset_done) begin 
+        else begin 
             o_wb_stall <= o_wb_stall_d || state_calibrate != DONE_CALIBRATE;
             o_wb_stall_q <= o_wb_stall_d; 
             o_wb_stall_calib <= o_wb_stall_d; //wb stall for calibration stage
-            cmd_odt_q <= cmd_odt;
-
-            //update delay counter 
-            for(index=0; index< (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
-                delay_before_precharge_counter_q[index] <= delay_before_precharge_counter_d[index];  
-                delay_before_activate_counter_q[index] <= delay_before_activate_counter_d[index];
-                delay_before_write_counter_q[index] <= delay_before_write_counter_d[index]; 
-                delay_before_read_counter_q[index] <= delay_before_read_counter_d[index]; 
-            end
-
-            //update bank status and active row
-            for(index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
-                bank_status_q[index] <= bank_status_d[index];
-                bank_active_row_q[index] <= bank_active_row_d[index];
-            end
-
-            if(instruction_address == 20 || instruction_address == 24) begin ///current instruction at precharge
-                cmd_odt_q <= 1'b0;
-                //all banks will be in idle after refresh
-                for( index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
-                    bank_status_q[index] <= 0;  
-                end
-            end
-            
             //refresh sequence is on-going
             if(!instruction[REF_IDLE]) begin
                 //no transaction will be pending during refresh
                 o_wb_stall <= 1'b1; 
                 o_wb_stall_calib <= 1'b1;
             end
-            
-            //if pipeline is not stalled (or a request is left on the prestall
-            //delay address 19 or if in calib), move pipeline to stage 2
-            if(stage2_update) begin //ITS POSSIBLE ONLY NEXT CLK WILL STALL SUPPOSE TO GO LOW
-                stage2_pending <= stage1_pending;
-                if(ECC_ENABLE != 3) begin
-                    stage1_pending <= 1'b0; //no request initially unless overridden by the actual stb request
-                    stage2_pending <= stage1_pending;
-                    stage2_aux <= stage1_aux;
-                    stage2_we <= stage1_we;
-                    stage2_col <= stage1_col;
-                    stage2_bank <= stage1_bank;
-                    stage2_row <= stage1_row;
-                    if(ODELAY_SUPPORTED || DLL_OFF) begin
-                        stage2_data_unaligned <= stage1_data_mux;
-                        stage2_dm_unaligned <= ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
-                    end
-                    else begin
-                        stage2_data_unaligned_temp <= stage1_data_mux;
-                        stage2_dm_unaligned_temp <= ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
-                    end
-                end
-                // ECC_ENABLE == 3
-                else begin
-                    stage1_pending <= ecc_stage1_stall? stage1_pending : 1'b0; //stage1 remains the same for ECC op (no request initially unless overridden by the actual stb request)
-                    // if switching from write to read and ECC is not yet written then do a write first to store those ECC bits
-                    if(!stage1_we && stage2_we && stage1_pending && !write_ecc_stored_to_mem_d && initial_calibration_done) begin
-                        stage2_we <= 1'b1;
-                        // if ecc_stage1_stall, stage2 will start ECC write/read operation
-                        // if ECC write, then we are writing ECC for previous address
-                        // if ECC read, then we are reading ECC for current address
-                        stage2_col <= ecc_col_addr_prev;
-                        stage2_bank[BA_BITS-1:0] <= ecc_bank_addr_prev;
-                        stage2_row <= ecc_row_addr_prev;
-                        ecc_col_addr_prev <= ecc_col_addr;
-                        ecc_bank_addr_prev <= ecc_bank_addr;
-                        ecc_row_addr_prev <= ecc_row_addr;
-
-                        // For ECC requests, 2MSB of aux determines type of ECC request (read = 2'10, write = 2'b11)
-                        stage2_aux <= { 1'b1, 1'b1, 3'b000, {(AUX_WIDTH-5){1'b1}} };
-                    end
-                    else begin
-                        stage2_we <= stage1_we;
-                        // if ecc_stage1_stall, stage2 will start ECC write/read operation
-                        // if ECC write, then we are writing ECC for previous address
-                        // if ECC read, then we are reading ECC for current address
-                        stage2_col <= ecc_stage1_stall? (stage1_we? ecc_col_addr_prev : ecc_col_addr) : stage1_col;
-                        stage2_bank[BA_BITS-1:0] <= ecc_stage1_stall? (stage1_we? ecc_bank_addr_prev : ecc_bank_addr) : stage1_bank[BA_BITS-1:0];
-                        stage2_row <= ecc_stage1_stall? (stage1_we? ecc_row_addr_prev : ecc_row_addr) : stage1_row;
-                        ecc_col_addr_prev <= ecc_col_addr;
-                        ecc_bank_addr_prev <= ecc_bank_addr;
-                        ecc_row_addr_prev <= ecc_row_addr;
-                        // For ECC requests, 2MSB of aux determines type of ECC request (read = 2'10, write = 2'b11)
-                        // For non-ECC request (MSB is 0), next 3MSB is allotted for the column (burst position to know position of encoded parity ECC bits)
-                        stage2_aux <= ecc_stage1_stall? { 1'b1, !stage1_we, 3'b000, {(AUX_WIDTH-5){1'b1}} } : {1'b0, !stage1_we, stage1_col[5:3], stage1_aux[AUX_WIDTH-6:0]};
-                    end
-                    // store parity code for stage1_data
-                    stage2_encoded_parity <= encoded_parity;
-                    if(ODELAY_SUPPORTED  || DLL_OFF) begin
-                        stage2_data_unaligned <= stage1_data_mux;
-                        stage2_dm_unaligned <= ecc_stage1_stall? ~stage2_ecc_write_data_mask_d : ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
-                    end
-                    else begin
-                        stage2_data_unaligned_temp <= stage1_data_mux;
-                        stage2_dm_unaligned_temp <= ecc_stage1_stall? ~stage2_ecc_write_data_mask_d : ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
-                    end
-                end
-
-                //stage2_data -> shiftreg(CWL) -> OSERDES(DDR) -> ODELAY -> RAM
+            // stage 1
+            stage1_pending <= stage1_pending_d;
+            stage1_aux <= stage1_aux_d;
+            stage1_we <= stage1_we_d;
+            stage1_dm <= stage1_dm_d;
+            stage1_col <= stage1_col_d;
+            stage1_bank <= stage1_bank_d;
+            stage1_row <= stage1_row_d;
+            stage1_next_bank <= stage1_next_bank_d;
+            stage1_next_row <= stage1_next_row_d;
+            stage1_data <= stage1_data_d;
+            // stage 2
+            stage2_pending <= stage2_pending_d;
+            stage2_aux <= stage2_aux_d;
+            stage2_we <= stage2_we_d;
+            stage2_col <= stage2_col_d;
+            stage2_bank <= stage2_bank_d;
+            stage2_row <= stage2_row_d;
+            cmd_odt_q <= precharge_all_instruction || !reset_done? 0 : cmd_odt;
+            stage2_data_unaligned <= stage2_data_unaligned_d;
+            stage2_data_unaligned_temp <= stage2_data_unaligned_temp_d;
+            stage2_dm_unaligned <= stage2_dm_unaligned_d;
+            stage2_dm_unaligned_temp <= stage2_dm_unaligned_temp_d;
+            if(ECC_ENABLE == 3) begin
+                ecc_col_addr_prev <= ecc_col_addr_prev_d;
+                ecc_bank_addr_prev <= ecc_bank_addr_prev_d;
+                ecc_row_addr_prev <= ecc_row_addr_prev_d;
+                ecc_bank_addr <= ecc_bank_addr_d;
+                ecc_row_addr <= ecc_row_addr_d;
+                ecc_col_addr <= ecc_col_addr_d;
+                stage2_encoded_parity <= stage2_encoded_parity_d;
             end
-            if(!ODELAY_SUPPORTED && !DLL_OFF) begin
-                stage2_data_unaligned <= stage2_data_unaligned_temp; //_temp is for added delay of 1 clock cycle (no ODELAY so no added delay)
-                stage2_dm_unaligned <= stage2_dm_unaligned_temp;  //_temp is for added delay of 1 clock cycle (no ODELAY so no added delay)
+            for(index=0; index< (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
+                delay_before_precharge_counter_q[index] <= delay_before_precharge_counter_d[index];  
+                delay_before_activate_counter_q[index] <= delay_before_activate_counter_d[index];
+                delay_before_write_counter_q[index] <= delay_before_write_counter_d[index]; 
+                delay_before_read_counter_q[index] <= delay_before_read_counter_d[index]; 
+            end
+            for( index=0; index < (1<<(BA_BITS+DUAL_RANK_DIMM)); index=index+1) begin
+                bank_status_q[index] <= precharge_all_instruction? 0 : bank_status_d[index];  
+                bank_active_row_q[index] <= bank_active_row_d[index];
             end
 
-            if(stage1_update) begin 
-                //stage1 will not do the request (pending low) when the
-                //request is on the same bank as the current request. This
-                //will ensure stage1 bank will be different from stage2 bank
-
-                // if ECC_ENABLE != 3, then stage1 will always receive wishbone interface
-                if(ECC_ENABLE != 3) begin
-                    stage1_pending <= i_wb_stb;//actual request flag
-                    stage1_aux <= i_aux; //aux ID for AXI compatibility
-                    stage1_we <= i_wb_we; //write-enable
-                    stage1_dm <= (ECC_ENABLE == 0)? i_wb_sel : {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
-                end
-                // ECC_ENABLE == 3
-                else begin // if ECC_ENABLE = 3 (inline ECC), then stage1 will either receive stage0 or wishbone
-                    stage1_pending <= wb_stb_mux;//actual request flag
-                    stage1_aux <= aux_mux; //aux ID for AXI compatibility
-                    stage1_we <= wb_we_mux; //write-enable
-                    stage1_dm <= {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
-                end
-
-                if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
-                    if(DUAL_RANK_DIMM[0]) begin
-                        stage1_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= i_wb_addr[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
-                        stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= wb_addr_plus_anticipate[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
-                    end
-                    stage1_row <= i_wb_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
-                    stage1_bank[BA_BITS-1:0] <=  i_wb_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
-                    stage1_col <= { i_wb_addr[ (COL_BITS- $clog2(serdes_ratio*2)-1) : 0 ], {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
-                    //stage1_next_bank will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
-                    //precharge and activate will happen only at the end of the
-                    //current column with a margin dictated by
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_row , stage1_next_bank[BA_BITS-1:0]} <= wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    stage1_data <= i_wb_data;
-                end
-
-                else if(row_bank_col == 0) begin // memory address mapping: {bank, row, col}
-                    stage1_bank[BA_BITS-1:0] <=  i_wb_addr[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2))]; //bank_address
-                    stage1_row <= i_wb_addr[ (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //row_address
-                    stage1_col <= { i_wb_addr[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
-                    //stage1_next_row will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
-                    //precharge and activate will happen only at the end of the
-                    //current column with a margin dictated by
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_bank, stage1_next_row} <= wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    stage1_data <= i_wb_data;
-                end
-
-                else if(row_bank_col == 2) begin // memory address mapping: {bank[2:1], row, bank[0], col} , used for ECC_ENABLE = 3 (Inline ECC)
-                    stage1_bank[2:1] <=  wb_addr_mux[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)]; //bank_address
-                    stage1_row <= wb_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1) ]; //row_address
-                    stage1_bank[0] <= wb_addr_mux[COL_BITS - $clog2(serdes_ratio*2)];
-                    stage1_col <= { wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
-                    //stage1_next_bank will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. This will overwrap every two banks
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_bank[2:1], stage1_next_row, stage1_next_bank[0]} <= wb_addr_plus_anticipate >> (COL_BITS - $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    // ECC Mapping (Excel sheet design planning: https://docs.google.com/spreadsheets/d/1_8vrLmVSFpvRD13Mk8aNAMYlh62SfpPXOCYIQFEtcs4/edit?gid=0#gid=0)
-                    ecc_bank_addr <= {2'b11,!wb_addr_mux[COL_BITS - $clog2(serdes_ratio*2)]};
-                    ecc_row_addr <= {1'b1, wb_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1 + 1) ]};
-                    ecc_col_addr <= { wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) + 1)] , 
-                                        wb_addr_mux[(BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)] ,
-                                        wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) - 1) : 3], 3'b000 };
-                    stage1_data <= wb_data_mux;
-                end
-            end
-
-            // request from calibrate FSM will be accepted here
-            else if(stage1_update_calib) begin
-                // if ECC_ENABLE != 3, then stage1 will always receive wishbone interface
-                if(ECC_ENABLE != 3) begin
-                    stage1_pending <= calib_stb;//actual request flag
-                    stage1_aux <= calib_aux; //aux ID for AXI compatibility
-                    stage1_we <= calib_we; //write-enable
-                    stage1_dm <= (ECC_ENABLE == 0)? calib_sel : {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
-                end
-                // ECC_ENABLE == 3
-                else begin // if ECC_ENABLE = 3 (inline ECC), then stage1 will either receive stage0 or wishbone
-                    stage1_pending <= calib_stb_mux;//actual request flag
-                    stage1_we <= calib_we_mux; //write-enable
-                    stage1_dm <= {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
-                    stage1_aux <= calib_aux_mux; //aux ID for AXI compatibility
-                end
-
-                if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
-                    if(DUAL_RANK_DIMM[0]) begin
-                        stage1_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= current_rank; // rank depends on current_rank
-                        stage1_next_bank[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] <= current_rank; // rank depends on current_rank
-                    end
-                    stage1_row <= calib_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
-                    stage1_bank[BA_BITS-1:0] <=  calib_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
-                    stage1_col <= { calib_addr[ (COL_BITS- $clog2(serdes_ratio*2)-1) : 0 ], {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (8-burst word-aligned)
-                    //stage1_next_bank will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
-                    //precharge and activate will happen only at the end of the
-                    //current column with a margin dictated by
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_row , stage1_next_bank[BA_BITS-1:0] } <= calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    stage1_data <= calib_data;
-                end
-                else if(row_bank_col == 0) begin // memory address mapping: {bank, row, col}
-                    stage1_bank[BA_BITS-1:0] <=  calib_addr[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2))]; //bank_address
-                    stage1_row <= calib_addr[ (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //row_address
-                    stage1_col <= { calib_addr[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (8-burst word-aligned)
-                    //stage1_next_row will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
-                    //precharge and activate will happen only at the end of the
-                    //current column with a margin dictated by
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_bank, stage1_next_row} <= calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    stage1_data <= calib_data;
-                end
-                else if(row_bank_col == 2) begin // memory address mapping: {bank[2:1], row, bank[0], col}
-                    stage1_bank[2:1] <=  calib_addr_mux[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)]; //bank_address
-                    stage1_row <= calib_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1) ]; //row_address
-                    stage1_bank[0] <= calib_addr_mux[COL_BITS - $clog2(serdes_ratio*2)];
-                    stage1_col <= { calib_addr_mux[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
-                    //stage1_next_row will not increment unless stage1_next_col
-                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. This will overwrap every two banks
-                    //MARGIN_BEFORE_ANTICIPATE  
-                    /* verilator lint_off WIDTH */
-                    {stage1_next_bank[2:1], stage1_next_row, stage1_next_bank[0]} <= calib_addr_plus_anticipate >> (COL_BITS - $clog2(serdes_ratio*2));
-                    //anticipated next row and bank to be accessed 
-                    /* verilator lint_on WIDTH */
-                    // ECC Mapping (Excel sheet design planning: https://docs.google.com/spreadsheets/d/1_8vrLmVSFpvRD13Mk8aNAMYlh62SfpPXOCYIQFEtcs4/edit?gid=0#gid=0)
-                    // ECC_BANK = {11,!bank[0]} 
-                    // ECC_ROW = {1,row>>1} 
-                    // ECC_COL = {row[0],bank[2:1],col>>3}"						
-                    ecc_bank_addr <= {2'b11,!calib_addr_mux[COL_BITS - $clog2(serdes_ratio*2)]};
-                    ecc_row_addr <= {1'b1, calib_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1 + 1) ]};
-                    ecc_col_addr <= { calib_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) + 1)] , 
-                                        calib_addr_mux[(BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)] ,
-                                        calib_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) - 1) : 3], 3'b000 };
-                    stage1_data <= calib_data_mux;
-                end
-            end
-            
             // stage2 can have multiple pipelined stages inside it which acts as delay before issuing the write data (after issuing write command)
             for(index = 0; index < STAGE2_DATA_DEPTH-1; index = index+1) begin
-                stage2_data[index+1] <=  stage2_data[index]; // 0->1, 1->2           
+                stage2_data[index+1] <= stage2_data[index]; // 0->1, 1->2           
                 stage2_dm[index+1] <= stage2_dm[index];
             end
 
@@ -1328,14 +1149,284 @@ module ddr3_controller #(
                     /* verilator lint_on WIDTH */
                 end // end for else statement (dq is not late for this lane)
             end // end of for loop to forward stage2_unaligned to stage2 by lane
-          
-            //abort any outgoing ack when cyc is low
-            if(!i_wb_cyc && final_calibration_done) begin
-                stage2_pending <= 0;
-                stage1_pending <= 0;
+                end
             end
+            
+    always @* begin
+        // stage 1
+        stage1_pending_d = stage1_pending;
+        stage1_aux_d = stage1_aux;
+        stage1_we_d = stage1_we;
+        stage1_dm_d = stage1_dm;
+        stage1_col_d = stage1_col;
+        stage1_bank_d = stage1_bank;
+        stage1_row_d = stage1_row;
+        stage1_next_bank_d = stage1_next_bank;
+        stage1_next_row_d = stage1_next_row;
+        stage1_data_d = stage1_data;
+        // stage 2
+        stage2_pending_d = stage2_pending;
+        stage2_aux_d = stage2_aux;
+        stage2_we_d = stage2_we;
+        stage2_col_d = stage2_col;
+        stage2_bank_d = stage2_bank;
+        stage2_row_d = stage2_row;
+        stage2_data_unaligned_d = stage2_data_unaligned;
+        stage2_data_unaligned_temp_d = stage2_data_unaligned_temp;
+        stage2_dm_unaligned_d = stage2_dm_unaligned;
+        stage2_dm_unaligned_temp_d = stage2_dm_unaligned_temp;
+        if(ECC_ENABLE == 3) begin
+            ecc_col_addr_prev_d = ecc_col_addr_prev;
+            ecc_bank_addr_prev_d = ecc_bank_addr_prev;
+            ecc_row_addr_prev_d = ecc_row_addr_prev;
+            ecc_bank_addr_d = ecc_bank_addr;
+            ecc_row_addr_d = ecc_row_addr;
+            ecc_col_addr_d = ecc_col_addr;
+            stage2_encoded_parity_d = stage2_encoded_parity;
+            end
+            
+        /////////////////////////////////////////
+        // Stage 2 
+        /////////////////////////////////////////
+            //if pipeline is not stalled (or a request is left on the prestall
+            //delay address 19 or if in calib), move pipeline to stage 2
+            if(stage2_update) begin //ITS POSSIBLE ONLY NEXT CLK WILL STALL SUPPOSE TO GO LOW
+            stage2_pending_d = stage1_pending;
+                if(ECC_ENABLE != 3) begin
+                stage1_pending_d = 1'b0; //no request initially unless overridden by the actual stb request
+                stage2_pending_d = stage1_pending;
+                stage2_aux_d = stage1_aux;
+                stage2_we_d = stage1_we;
+                stage2_col_d = stage1_col;
+                stage2_bank_d = stage1_bank;
+                stage2_row_d = stage1_row;
+                    if(ODELAY_SUPPORTED || DLL_OFF) begin
+                    stage2_data_unaligned_d = stage1_data_mux;
+                    stage2_dm_unaligned_d = ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
+                    end
+                    else begin
+                    stage2_data_unaligned_temp_d = stage1_data_mux;
+                    stage2_dm_unaligned_temp_d = ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
+                    end
+                end
+                // ECC_ENABLE == 3
+                else begin
+                stage1_pending_d = ecc_stage1_stall? stage1_pending : 1'b0; //stage1 remains the same for ECC op (no request initially unless overridden by the actual stb request)
+                    // if switching from write to read and ECC is not yet written then do a write first to store those ECC bits
+                    if(!stage1_we && stage2_we && stage1_pending && !write_ecc_stored_to_mem_d && initial_calibration_done) begin
+                    stage2_we_d = 1'b1;
+                        // if ecc_stage1_stall, stage2 will start ECC write/read operation
+                        // if ECC write, then we are writing ECC for previous address
+                        // if ECC read, then we are reading ECC for current address
+                    stage2_col_d = ecc_col_addr_prev;
+                    stage2_bank_d[BA_BITS-1:0] = ecc_bank_addr_prev;
+                    stage2_row_d = ecc_row_addr_prev;
+                    ecc_col_addr_prev_d = ecc_col_addr;
+                    ecc_bank_addr_prev_d = ecc_bank_addr;
+                    ecc_row_addr_prev_d = ecc_row_addr;
+                        // For ECC requests, 2MSB of aux determines type of ECC request (read = 2'10, write = 2'b11)
+                    stage2_aux_d = { 1'b1, 1'b1, 3'b000, {(AUX_WIDTH-5){1'b1}} };
+                    end
+                // else pass stage 1 to stage 2
+                    else begin
+                    stage2_we_d = stage1_we;
+                        // if ecc_stage1_stall, stage2 will start ECC write/read operation
+                        // if ECC write, then we are writing ECC for previous address
+                        // if ECC read, then we are reading ECC for current address
+                    stage2_col_d = ecc_stage1_stall? (stage1_we? ecc_col_addr_prev : ecc_col_addr) : stage1_col;
+                    stage2_bank_d[BA_BITS-1:0] = ecc_stage1_stall? (stage1_we? ecc_bank_addr_prev : ecc_bank_addr) : stage1_bank[BA_BITS-1:0];
+                    stage2_row_d = ecc_stage1_stall? (stage1_we? ecc_row_addr_prev : ecc_row_addr) : stage1_row;
+                    ecc_col_addr_prev_d = ecc_col_addr;
+                    ecc_bank_addr_prev_d = ecc_bank_addr;
+                    ecc_row_addr_prev_d = ecc_row_addr;
+                        // For ECC requests, 2MSB of aux determines type of ECC request (read = 2'10, write = 2'b11)
+                        // For non-ECC request (MSB is 0), next 3MSB is allotted for the column (burst position to know position of encoded parity ECC bits)
+                    stage2_aux_d = ecc_stage1_stall? { 1'b1, !stage1_we, 3'b000, {(AUX_WIDTH-5){1'b1}} } : {1'b0, !stage1_we, stage1_col[5:3], stage1_aux[AUX_WIDTH-6:0]};
+                    end
+                    // store parity code for stage1_data
+                stage2_encoded_parity_d = encoded_parity;
+                    if(ODELAY_SUPPORTED  || DLL_OFF) begin
+                    stage2_data_unaligned_d = stage1_data_mux;
+                    stage2_dm_unaligned_d = ecc_stage1_stall? ~stage2_ecc_write_data_mask_d : ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
+                    end
+                    else begin
+                    stage2_data_unaligned_temp_d = stage1_data_mux;
+                    stage2_dm_unaligned_temp_d = ecc_stage1_stall? ~stage2_ecc_write_data_mask_d : ~stage1_dm; //inverse each bit (1 must mean "masked" or not written)
+                    end
+            end
+            // pipeline: stage2_data -> shiftreg(CWL) -> OSERDES(DDR) -> ODELAY -> RAM
+                end
+
+            if(!ODELAY_SUPPORTED && !DLL_OFF) begin
+            //_temp is for added delay of 1 clock cycle (no ODELAY so no added delay)
+            stage2_data_unaligned_d = stage2_data_unaligned_temp; 
+            stage2_dm_unaligned_d = stage2_dm_unaligned_temp;
+            end
+
+        /////////////////////////////////////////
+        // Stage 1
+        /////////////////////////////////////////
+        if(stage1_update && reset_done) begin 
+                //stage1 will not do the request (pending low) when the
+                //request is on the same bank as the current request. This
+                //will ensure stage1 bank will be different from stage2 bank
+
+                // if ECC_ENABLE != 3, then stage1 will always receive wishbone interface
+                if(ECC_ENABLE != 3) begin
+                stage1_pending_d = i_wb_stb;//actual request flag
+                stage1_aux_d = i_aux; //aux ID for AXI compatibility
+                stage1_we_d = i_wb_we; //write-enable
+                stage1_dm_d = (ECC_ENABLE == 0)? i_wb_sel : {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
+                end
+                // ECC_ENABLE == 3
+                else begin // if ECC_ENABLE = 3 (inline ECC), then stage1 will either receive stage0 or wishbone
+                stage1_pending_d = wb_stb_mux;//actual request flag
+                stage1_aux_d = aux_mux; //aux ID for AXI compatibility
+                stage1_we_d = wb_we_mux; //write-enable
+                stage1_dm_d = {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
+                end
+
+                if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
+                    if(DUAL_RANK_DIMM[0]) begin
+                    stage1_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = i_wb_addr[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
+                    stage1_next_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = wb_addr_plus_anticipate[DUAL_RANK_DIMM[0]? (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2)) : 0]; // msb determines rank
+                    end
+                stage1_row_d = i_wb_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
+                stage1_bank_d[BA_BITS-1:0] =  i_wb_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
+                stage1_col_d = { i_wb_addr[ (COL_BITS- $clog2(serdes_ratio*2)-1) : 0 ], {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
+                    //stage1_next_bank will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+                    //precharge and activate will happen only at the end of the
+                    //current column with a margin dictated by
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_row_d , stage1_next_bank_d[BA_BITS-1:0]} = wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                stage1_data_d = i_wb_data;
+                end
+
+                else if(row_bank_col == 0) begin // memory address mapping: {bank, row, col}
+                stage1_bank_d[BA_BITS-1:0] = i_wb_addr[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2))]; //bank_address
+                stage1_row_d = i_wb_addr[ (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //row_address
+                stage1_col_d = { i_wb_addr[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
+                    //stage1_next_row will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+                    //precharge and activate will happen only at the end of the
+                    //current column with a margin dictated by
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_bank_d, stage1_next_row_d} = wb_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                stage1_data_d = i_wb_data;
+                end
+
+                else if(row_bank_col == 2) begin // memory address mapping: {bank[2:1], row, bank[0], col} , used for ECC_ENABLE = 3 (Inline ECC)
+                stage1_bank_d[2:1] =  wb_addr_mux[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)]; //bank_address
+                stage1_row_d = wb_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1) ]; //row_address
+                stage1_bank_d[0] = wb_addr_mux[COL_BITS - $clog2(serdes_ratio*2)];
+                stage1_col_d = { wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
+                    //stage1_next_bank will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. This will overwrap every two banks
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_bank_d[2:1], stage1_next_row_d, stage1_next_bank_d[0]} = wb_addr_plus_anticipate >> (COL_BITS - $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                    // ECC Mapping (Excel sheet design planning: https://docs.google.com/spreadsheets/d/1_8vrLmVSFpvRD13Mk8aNAMYlh62SfpPXOCYIQFEtcs4/edit?gid=0#gid=0)
+                ecc_bank_addr_d = {2'b11,!wb_addr_mux[COL_BITS - $clog2(serdes_ratio*2)]};
+                ecc_row_addr_d = {1'b1, wb_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1 + 1) ]};
+                ecc_col_addr_d = { wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) + 1)] , 
+                                        wb_addr_mux[(BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)] ,
+                                        wb_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) - 1) : 3], 3'b000 };
+                stage1_data_d = wb_data_mux;
+                end
+            end
+
+            // request from calibrate FSM will be accepted here
+        else if(stage1_update_calib && reset_done) begin
+                // if ECC_ENABLE != 3, then stage1 will always receive wishbone interface
+                if(ECC_ENABLE != 3) begin
+                stage1_pending_d = calib_stb;//actual request flag
+                stage1_aux_d = calib_aux; //aux ID for AXI compatibility
+                stage1_we_d = calib_we; //write-enable
+                stage1_dm_d = (ECC_ENABLE == 0)? calib_sel : {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
+                end
+                // ECC_ENABLE == 3
+                else begin // if ECC_ENABLE = 3 (inline ECC), then stage1 will either receive stage0 or wishbone
+                stage1_pending_d = calib_stb_mux;//actual request flag
+                stage1_we_d = calib_we_mux; //write-enable
+                stage1_dm_d = {wb_sel_bits{1'b1}}; // no data masking when ECC is enabled
+                stage1_aux_d = calib_aux_mux; //aux ID for AXI compatibility
+                end
+
+                if(row_bank_col == 1) begin // memory address mapping: {row, bank, col}
+                    if(DUAL_RANK_DIMM[0]) begin
+                    stage1_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = current_rank; // rank depends on current_rank
+                    stage1_next_bank_d[(DUAL_RANK_DIMM[0]? BA_BITS : 0)] = current_rank; // rank depends on current_rank
+                    end
+                stage1_row_d = calib_addr[ (ROW_BITS + BA_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (BA_BITS + COL_BITS - $clog2(serdes_ratio*2)) ]; //row_address
+                stage1_bank_d[BA_BITS-1:0] =  calib_addr[ (BA_BITS + COL_BITS - $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //bank_address
+                stage1_col_d = { calib_addr[ (COL_BITS- $clog2(serdes_ratio*2)-1) : 0 ], {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (8-burst word-aligned)
+                    //stage1_next_bank will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+                    //precharge and activate will happen only at the end of the
+                    //current column with a margin dictated by
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_row_d , stage1_next_bank_d[BA_BITS-1:0] } = calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                stage1_data_d = calib_data;
+                end
+                else if(row_bank_col == 0) begin // memory address mapping: {bank, row, col}
+                stage1_bank_d[BA_BITS-1:0] =  calib_addr[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2))]; //bank_address
+                stage1_row_d = calib_addr[ (ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (COL_BITS- $clog2(serdes_ratio*2)) ]; //row_address
+                stage1_col_d = { calib_addr[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (8-burst word-aligned)
+                    //stage1_next_row will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. Thus, anticipated
+                    //precharge and activate will happen only at the end of the
+                    //current column with a margin dictated by
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_bank_d, stage1_next_row_d} = calib_addr_plus_anticipate >> (COL_BITS- $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                stage1_data_d = calib_data;
+                end
+                else if(row_bank_col == 2) begin // memory address mapping: {bank[2:1], row, bank[0], col}
+                stage1_bank_d[2:1] =  calib_addr_mux[ (BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)]; //bank_address
+                stage1_row_d = calib_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1) ]; //row_address
+                stage1_bank_d[0] = calib_addr_mux[COL_BITS - $clog2(serdes_ratio*2)];
+                stage1_col_d = { calib_addr_mux[(COL_BITS- $clog2(serdes_ratio*2)-1) : 0] , {{$clog2(serdes_ratio*2)}{1'b0}} }; //column address (n-burst word-aligned)
+                    //stage1_next_row will not increment unless stage1_next_col
+                    //overwraps due to MARGIN_BEFORE_ANTICIPATE. This will overwrap every two banks
+                    //MARGIN_BEFORE_ANTICIPATE  
+                    /* verilator lint_off WIDTH */
+                {stage1_next_bank_d[2:1], stage1_next_row_d, stage1_next_bank_d[0]} = calib_addr_plus_anticipate >> (COL_BITS - $clog2(serdes_ratio*2));
+                    //anticipated next row and bank to be accessed 
+                    /* verilator lint_on WIDTH */
+                    // ECC Mapping (Excel sheet design planning: https://docs.google.com/spreadsheets/d/1_8vrLmVSFpvRD13Mk8aNAMYlh62SfpPXOCYIQFEtcs4/edit?gid=0#gid=0)
+                    // ECC_BANK = {11,!bank[0]} 
+                    // ECC_ROW = {1,row>>1} 
+                    // ECC_COL = {row[0],bank[2:1],col>>3}"						
+                ecc_bank_addr_d = {2'b11,!calib_addr_mux[COL_BITS - $clog2(serdes_ratio*2)]};
+                ecc_row_addr_d = {1'b1, calib_addr_mux[ (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2)) : (COL_BITS - $clog2(serdes_ratio*2) + 1 + 1) ]};
+                ecc_col_addr_d = { calib_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) + 1)] , 
+                                        calib_addr_mux[(BA_BITS + ROW_BITS + COL_BITS- $clog2(serdes_ratio*2) - 1) : (ROW_BITS + COL_BITS - $clog2(serdes_ratio*2) + 1)] ,
+                                        calib_addr_mux[(COL_BITS - $clog2(serdes_ratio*2) - 1) : 3], 3'b000 };
+                stage1_data_d = calib_data_mux;
+                end
+            end
+            
+        //abort any outgoing ack when cyc is low
+        if(!i_wb_cyc && final_calibration_done) begin
+            stage2_pending_d = 0;
+            stage1_pending_d = 0;
         end
     end
+
     always @* begin
         for(index = 0; index < LANES; index = index + 1) begin
             late_dq[index] = (lane_write_dq_late[index] && (data_start_index[index] != 0)) && (STAGE2_DATA_DEPTH > 1);
