@@ -582,6 +582,7 @@ module ddr3_controller #(
     reg prev_write_level_feedback = 1;
     reg[wb_data_bits-1:0] read_data_store = 0;
     reg[127:0] write_pattern = 0;
+    reg[63:0] write_pattern_lane = 0;
     reg[$clog2(64):0] data_start_index[LANES-1:0];   
     reg[LANES-1:0] lane_write_dq_late = 0;    
     reg[LANES-1:0] lane_read_dq_early = 0;    
@@ -594,6 +595,7 @@ module ddr3_controller #(
     reg stored_write_level_feedback = 0;
     reg[5:0] start_index_check = 0;
     reg[63:0] read_lane_data = 0;
+    reg[31:0] read_lane_data_shifted = 0;
     reg odelay_cntvalue_halfway = 0;
     reg initial_calibration_done = 0;
     reg final_calibration_done = 0;
@@ -664,6 +666,9 @@ module ddr3_controller #(
     reg stage1_do_act, stage1_do_act_d;
     reg force_o_wb_stall_high_q, force_o_wb_stall_high_d;
     reg force_o_wb_stall_calib_high_q, force_o_wb_stall_calib_high_d;
+    reg[1:0] prep_done;
+    reg write_pattern_matches;
+    
     // initial block for all regs
     initial begin
         o_wb_stall = 1;
@@ -1440,9 +1445,9 @@ module ddr3_controller #(
         end
     end
 
-    always @* begin
-        for(index = 0; index < LANES; index = index + 1) begin
-            late_dq[index] = (lane_write_dq_late[index] && (data_start_index[index] != 0)) && (STAGE2_DATA_DEPTH > 1);
+    always @(posedge i_controller_clk) begin
+            for(index = 0; index < LANES; index = index + 1) begin
+            late_dq[index] <= (lane_write_dq_late[index] && (data_start_index[index] != 0)) && (STAGE2_DATA_DEPTH > 1);
         end
     end
     
@@ -2406,6 +2411,9 @@ module ddr3_controller #(
             pause_counter <= 0;
             read_data_store <= 0;
             write_pattern <= 0;
+            write_pattern_lane <= 0;
+            read_lane_data_shifted <= 0;
+            write_pattern_matches <= 0;
             added_read_pipe_max <= 0;
             dqs_start_index_stored <= 0;
             dqs_start_index_repeat <= 0;        
@@ -2426,6 +2434,7 @@ module ddr3_controller #(
             lane_read_dq_early <= 0;
             shift_read_pipe <= 0;
             bitslip_counter <= 0;
+            prep_done <= 0;
             `ifdef UART_DEBUG
                 uart_start_send <= 0;
                 uart_text <= 0;
@@ -2458,6 +2467,7 @@ module ddr3_controller #(
             idelay_data_cntvaluein_prev <= idelay_data_cntvaluein[lane];
             reset_from_calibrate <= 0;
             reset_after_rank_1 <= 0; // reset for dual rank
+            prep_done <= 0;
 
             if(wb2_update) begin
                 odelay_data_cntvaluein[wb2_write_lane] <=  wb2_phy_odelay_data_ld[wb2_write_lane]? wb2_phy_odelay_data_cntvaluein : odelay_data_cntvaluein[wb2_write_lane];
@@ -2995,9 +3005,8 @@ module ddr3_controller #(
                         // e.g. LANE={burst7, burst6, burst5, burst4, burst3, burst2, burst1, burst0} then with 1 ddr3 cycle delay between DQ and command 
                         // burst0 will not be written but only starting on burst1
                         // if lane_write_dq_late is already set to 1 for this lane, then current lane should already be fixed without changing the data_start_index
-        ANALYZE_DATA: if(write_pattern[ (lane_write_dq_late[lane]? 0 : data_start_index[lane])  +: 64] == {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                        read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8],read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] }) begin   
+        ANALYZE_DATA:   if(prep_done[1]) begin
+                            if(write_pattern_matches) begin   
                             /* verilator lint_off WIDTH */
                             if(lane == LANES - 1) begin
                             /* verilator lint_on WIDTH */
@@ -3013,6 +3022,7 @@ module ddr3_controller #(
                             else begin
                                 lane <= lane + 1;
                                 data_start_index[lane+1] <= 0;
+                                    state_calibrate <= ANALYZE_DATA;
                                 `ifdef UART_DEBUG_ALIGN
                                     uart_start_send <= 1'b1;
                                     uart_text <= {"state=ANALYZE_DATA, Done lane=",hex_to_ascii(lane),8'h0a,"-----------------",8'h0a};
@@ -3062,6 +3072,7 @@ module ddr3_controller #(
                         `ifdef UART_DEBUG_ALIGN
                             else begin
                                 uart_start_send <= 1'b1;
+                                    state_calibrate <= ANALYZE_DATA;
                                 uart_text <= {"state=ANALYZE_DATA, lane=",hex_to_ascii(lane), ", data_start_index[lane]=0x",
                                     hex_to_ascii(data_start_index[lane][6:4]),hex_to_ascii(data_start_index[lane][3:0]),8'h0a,8'h0a,8'h0a,8'h0a,
                                     {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
@@ -3073,13 +3084,17 @@ module ddr3_controller #(
                                 state_calibrate_next <= ANALYZE_DATA;
                             end
                         `endif
+                            end     
+                        end
+                        else begin
+                            prep_done <= {prep_done[0],1'b1};
                       end     
 
                       // check when the 4 MSB of write_pattern {d0ad51c1} starts on read_lane_data (read_lane_data is just the concatenation of read_data_store of a specific lane)
                       // assumption here read_lane_data ~= 298cd0ad51c1XXXX is written: either because we write too late (thus we need to delay outgoing stage2_data) OR we read too early (thus we need to calibrate incoming iserdes_dq)
- CHECK_STARTING_DATA: begin
+ CHECK_STARTING_DATA: if(prep_done[1]) begin
                         /* verilator lint_off WIDTHTRUNC */
-                        if(read_lane_data[start_index_check +: 32] == write_pattern[0 +: 32]) begin
+                            if(read_lane_data_shifted == write_pattern[0 +: 32]) begin
                         /* verilator lint_on WIDTHTRUNC */
                             // first assumption: controller DQ is late WHEN WRITING(THUS WE NEED TO CALIBRATE data_start_index of outgoing stage2_data)
                             if(!lane_write_dq_late[lane]) begin // lane_write_dq_late is not  yet set so we know this first assunmption is not yet tested
@@ -3137,6 +3152,9 @@ module ddr3_controller #(
                             end
                          `endif
                         end
+                        end
+                    else begin
+                        prep_done <= {prep_done[0],1'b1};
                       end
       
 BITSLIP_DQS_TRAIN_3: if(train_delay == 0) begin //train again the ISERDES to capture the DQ correctly
@@ -3354,10 +3372,13 @@ ALTERNATE_WRITE_READ: if(!o_wb_stall_calib) begin
         `ifdef FORMAL_COVER
             state_calibrate <= DONE_CALIBRATE;
         `endif
-        
-             read_lane_data <= {read_data_store[((DQ_BITS*LANES)*7 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*6 + 8*lane) +: 8],
-                    read_data_store[((DQ_BITS*LANES)*5 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*4 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*3 + 8*lane) +: 8],
-                    read_data_store[((DQ_BITS*LANES)*2 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*1 + 8*lane) +: 8], read_data_store[((DQ_BITS*LANES)*0 + 8*lane) +: 8] };
+            read_lane_data <= {read_data_store[((DQ_BITS*LANES)*7 + ({29'd0, lane}<<3)) +: 8], read_data_store[((DQ_BITS*LANES)*6 + ({29'd0, lane}<<3)) +: 8],
+                        read_data_store[((DQ_BITS*LANES)*5 + ({29'd0, lane}<<3)) +: 8], read_data_store[((DQ_BITS*LANES)*4 + ({29'd0, lane}<<3)) +: 8], read_data_store[((DQ_BITS*LANES)*3 + ({29'd0, lane}<<3)) +: 8],
+                        read_data_store[((DQ_BITS*LANES)*2 + ({29'd0, lane}<<3)) +: 8],read_data_store[((DQ_BITS*LANES)*1 + ({29'd0, lane}<<3)) +: 8],read_data_store[((DQ_BITS*LANES)*0 + ({29'd0, lane}<<3)) +: 8] };
+            write_pattern_lane <= write_pattern[ (lane_write_dq_late[lane]? 0 : data_start_index[lane])  +: 64];
+            read_lane_data_shifted <= read_lane_data[start_index_check +: 32];
+            write_pattern_matches <= write_pattern_lane == read_lane_data;
+
              //halfway value has been reached (illegal) and will go back to zero at next load
              if(odelay_data_cntvaluein[lane] == 15) begin
                 odelay_cntvalue_halfway <= 1; 
